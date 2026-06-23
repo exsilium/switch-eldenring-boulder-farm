@@ -1,125 +1,115 @@
 #include <Arduino.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_ST7789.h>
-#include <SPI.h>
+
+#include "app_state.h"
+#include "button.h"
+#include "display.h"
+#include "input_macro.h"
+#include "procon/procon_usb.h"
 
 // ---------------------------------------------------------------------------
-// Adafruit Feather ESP32-S3 TFT
-// Built-in 240x135 ST7789 TFT + BOOT button on GPIO0.
+// Switch Pro Controller emulation — Adafruit Feather ESP32-S3 TFT
 //
-// Behavior:
-//   - Hold the GPIO0 (BOOT) button.
-//   - A progress bar fills on the LCD over HOLD_DURATION_MS.
-//   - When the hold reaches HOLD_DURATION_MS, "Hello World" is printed
-//     (Serial + on screen). This mimics a one-button menu "long press".
+// A 2 s GPIO0 (BOOT) long-press toggles USB attach/detach. On connect the
+// firmware answers the Switch handshake, runs a one-shot D-pad LEFT -> 1s ->
+// RIGHT macro, then holds neutral. The TFT is the status/debug surface (USB
+// CDC serial is disabled).
 // ---------------------------------------------------------------------------
 
-#define BUTTON_PIN 0          // GPIO0 / BOOT button (active LOW)
-#define HOLD_DURATION_MS 2000 // Long-press threshold
+namespace {
+AppState gState = AppState::IDLE_DETACHED;
+bool gMacroDone = false;  // macro fires exactly once per connection
 
-// The board pin macros (TFT_CS, TFT_DC, TFT_RST, TFT_BACKLITE,
-// TFT_I2C_POWER) are provided by the Feather ESP32-S3 TFT variant.
-Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
-
-// Progress bar geometry
-const int16_t BAR_X = 20;
-const int16_t BAR_W = 200;
-const int16_t BAR_H = 28;
-const int16_t BAR_Y = 80;
-
-bool buttonWasDown = false;     // was the button held on the previous loop?
-bool helloTriggered = false;    // did we already fire for this hold?
-unsigned long pressStartMs = 0; // when the current hold began
-int16_t lastFillW = -1;         // last drawn fill width (avoid redraw flicker)
-
-void drawIdleScreen() {
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setTextWrap(false);
-
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(20, 20);
-  tft.printf("Hold BOOT %ds", HOLD_DURATION_MS / 1000);
-
-  tft.setTextColor(ST77XX_CYAN);
-  tft.setTextSize(1);
-  tft.setCursor(20, 50);
-  tft.print("(GPIO0 button)");
-
-  // Empty progress bar outline
-  tft.drawRect(BAR_X, BAR_Y, BAR_W, BAR_H, ST77XX_WHITE);
-  lastFillW = -1;
-}
-
-void drawProgress(float pct) {
-  if (pct < 0) pct = 0;
-  if (pct > 1) pct = 1;
-
-  int16_t fillW = (int16_t)((BAR_W - 4) * pct);
-  if (fillW == lastFillW) return; // nothing changed; skip redraw
-  lastFillW = fillW;
-
-  // Inner fill area (leave a 2px margin inside the outline)
-  uint16_t color = (pct >= 1.0f) ? ST77XX_GREEN : ST77XX_YELLOW;
-  tft.fillRect(BAR_X + 2, BAR_Y + 2, fillW, BAR_H - 4, color);
-  // Clear the remaining portion so a shorter bar doesn't leave residue
-  tft.fillRect(BAR_X + 2 + fillW, BAR_Y + 2,
-               (BAR_W - 4) - fillW, BAR_H - 4, ST77XX_BLACK);
-}
-
-void showHelloWorld() {
-  Serial.println("Hello World");
-
-  tft.fillScreen(ST77XX_BLACK);
-  tft.setTextColor(ST77XX_GREEN);
-  tft.setTextSize(3);
-  tft.setCursor(15, 55);
-  tft.print("Hello World");
-}
+void setState(AppState s) { gState = s; }
+}  // namespace
 
 void setup() {
-  Serial.begin(115200);
+  button::begin();
+  display::begin();
+  procon::begin();  // configures USB HID, starts detached
 
-  pinMode(BUTTON_PIN, INPUT_PULLUP); // BOOT button reads LOW when pressed
-
-  // Power up the TFT rail and turn on the backlight.
-  pinMode(TFT_I2C_POWER, OUTPUT);
-  digitalWrite(TFT_I2C_POWER, HIGH);
-  pinMode(TFT_BACKLITE, OUTPUT);
-  digitalWrite(TFT_BACKLITE, HIGH);
-
-  // 240x135 ST7789, landscape orientation.
-  tft.init(135, 240);
-  tft.setRotation(3);
-
-  drawIdleScreen();
+  setState(AppState::IDLE_DETACHED);
+  display::showState(gState);
 }
 
 void loop() {
-  bool buttonDown = (digitalRead(BUTTON_PIN) == LOW);
+  // Service USB on every iteration so the host never sees a silent endpoint.
+  procon::task();
 
-  if (buttonDown && !buttonWasDown) {
-    // Button just pressed: start timing this hold.
-    pressStartMs = millis();
-    helloTriggered = false;
-    drawIdleScreen();
+  const bool longPress = button::update();
+
+  switch (gState) {
+    case AppState::IDLE_DETACHED:
+      if (longPress) {
+        gMacroDone = false;
+        input_macro::reset();
+        procon::attach();
+        setState(AppState::ATTACHING);
+      }
+      break;
+
+    case AppState::ATTACHING:
+      // Long-press during a transition cancels back to detached.
+      if (longPress) {
+        procon::detach();
+        setState(AppState::DETACHING);
+      } else if (procon::mounted()) {
+        setState(AppState::HANDSHAKING);
+      }
+      break;
+
+    case AppState::HANDSHAKING:
+      if (longPress || !procon::mounted()) {
+        procon::detach();
+        setState(AppState::DETACHING);
+      } else if (procon::handshakeStarted()) {
+        if (gMacroDone) {
+          setState(AppState::CONNECTED_IDLE);
+        } else {
+          input_macro::start();
+          setState(AppState::RUN_MACRO);
+        }
+      }
+      break;
+
+    case AppState::RUN_MACRO:
+      if (longPress || !procon::mounted()) {
+        input_macro::reset();
+        procon::detach();
+        setState(AppState::DETACHING);
+      } else if (input_macro::update(procon::input())) {
+        gMacroDone = true;
+        setState(AppState::CONNECTED_IDLE);
+      }
+      break;
+
+    case AppState::CONNECTED_IDLE:
+      if (longPress || !procon::mounted()) {
+        procon::detach();
+        setState(AppState::DETACHING);
+      }
+      break;
+
+    case AppState::DETACHING:
+      procon::input().reset();
+      input_macro::reset();
+      setState(AppState::IDLE_DETACHED);
+      break;
   }
 
-  if (buttonDown) {
-    unsigned long held = millis() - pressStartMs;
-    drawProgress((float)held / (float)HOLD_DURATION_MS);
+  display::showState(gState);
 
-    if (!helloTriggered && held >= HOLD_DURATION_MS) {
-      helloTriggered = true;
-      showHelloWorld();
-    }
-  } else if (buttonWasDown) {
-    // Button released: reset back to idle unless we already fired.
-    if (!helloTriggered) {
-      drawIdleScreen();
-    }
+  // Live USB/handshake trace on the TFT (the only debug surface) from the
+  // moment we start attaching, so an enumeration stall is visible: MNT shows
+  // host mount, and the OUT count climbs once the host actually talks to us.
+  if (gState == AppState::ATTACHING || gState == AppState::HANDSHAKING ||
+      gState == AppState::RUN_MACRO || gState == AppState::CONNECTED_IDLE) {
+    const procon::Protocol::Diag& d = procon::diag();
+    display::showDiag(procon::mounted(), d.inCount, d.outCount, d.lastSubcommand,
+                      d.gotDeviceInfo, d.gotStickCal, d.gotSetMode,
+                      d.gotVibration);
   }
 
-  buttonWasDown = buttonDown;
-  delay(10);
+  // The long-press toggles attach/detach in every state, so show the arming
+  // bar filling whenever BOOT is held, and clear it the moment it's released.
+  display::showHoldProgress(button::isDown() ? button::holdProgress() : 0.0f);
 }
