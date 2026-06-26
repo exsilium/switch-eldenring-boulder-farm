@@ -1,0 +1,29 @@
+# Enable a single TinyUSB HID device (sets CFG_TUD_HID=1, EP bufsize 64).
+CONFIG_TINYUSB_HID_COUNT=1
+
+# Run the FreeRTOS tick at 1 kHz, like the working esp-usb-ble-hid reference.
+# The IDF default (100 Hz) gives 10 ms tick granularity, which is too coarse to
+# service TinyUSB control transfers promptly during USB enumeration -> the host
+# times out ("device not recognized"). The reference uses 1000 Hz.
+CONFIG_FREERTOS_HZ=1000
+
+# ESP32-S3 target (also set by the board, kept explicit for clarity).
+CONFIG_IDF_TARGET="esp32s3"
+
+# Bigger main task stack: TinyUSB descriptors + led_strip RMT setup.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# Free the USB PHY for TinyUSB OTG. On the ESP32-S3 the USB-Serial/JTAG
+# controller shares the same D+/D- pins as the USB-OTG controller; leaving the
+# secondary USB-Serial/JTAG console enabled holds the PHY and prevents our
+# TinyUSB HID device from enumerating (host never mounts -> stuck DETACHED).
+# Primary console stays on UART, so we lose nothing we use.
+# CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# Board has 4MB flash; silence the size mismatch warning.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# LVGL fonts used by the TFT UI (14 is on by default; the status screen uses 28).
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y

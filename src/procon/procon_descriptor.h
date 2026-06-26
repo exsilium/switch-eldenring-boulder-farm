@@ -7,7 +7,7 @@ namespace procon {
 // Nintendo Switch Pro Controller (wired) USB identity.
 constexpr uint16_t kVendorId = 0x057E;
 constexpr uint16_t kProductId = 0x2009;
-constexpr uint16_t kDeviceBcd = 0x0210;  // bcdDevice
+constexpr uint16_t kDeviceBcd = 0x0200;  // bcdDevice (matches real wired Pro Controller)
 
 constexpr char kManufacturer[] = "Nintendo Co., Ltd.";
 constexpr char kProduct[] = "Pro Controller";

@@ -27,16 +27,43 @@ class Protocol {
   // Reset per-connection handshake/timer state. Call on each fresh attach.
   void reset();
 
+  // Provision the device identity once at boot (matches the reference, which
+  // reads esp_read_mac and generates a serial at startup): copies the real
+  // device MAC (used in the hello + device-info replies) and injects a random
+  // ASCII serial into the factory SPI ROM serial region (0x60 0x00-0x0A).
+  void initIdentity(const uint8_t* mac);
+
   // Record an OUT report received from the host.
   void onOutputReport(const uint8_t* data, uint16_t len);
 
-  // Build the next 64-byte IN report. Returns a pointer to 64 bytes valid until
-  // the next call. The first byte is the report ID (0x30 / 0x21 / 0x81).
-  const uint8_t* generateUsbReport(size_t& outLen);
+  // Build the immediate IN reply to the OUT report just recorded via
+  // onOutputReport(). Returns a pointer to outLen bytes (valid until the next
+  // call); outLen == 0 means "send nothing" (e.g. a rumble-only report). Meant
+  // to be called synchronously from the USB OUT callback, exactly like
+  // finger563's on_hid_report -> tud_hid_report.
+  const uint8_t* buildResponse(size_t& outLen);
+
+  // One-shot device-initiated hello (0x81 0x01 + MAC). True once per connection
+  // until taken; mirrors finger563's single on_attach DEVICE_INIT_REPORT.
+  bool helloPending() const { return _helloPending; }
+  const uint8_t* takeHelloReport(size_t& outLen);
+
+  // True once the host switched us into standard (0x30) input mode; only then do
+  // we stream unsolicited input reports (a real controller is silent until
+  // set_mode 0x30). buildStreamReport() uses its own buffer so it is safe to
+  // call from the main loop while buildResponse() runs in the USB task.
+  bool streamingEnabled() const { return _standardMode; }
+  const uint8_t* buildStreamReport(size_t& outLen);
 
   // True once the host has queried device info (a useful "handshake underway"
   // signal for the UI / state machine).
   bool handshakeStarted() const { return _deviceInfoQueried; }
+
+  // Sticky total of OUT reports received across ALL connection sessions (NOT
+  // cleared by reset()). >0 proves the host enumerated us and began the
+  // handshake at least once -- distinguishes "never enumerated" from "handshake
+  // failed" even if the host attach/detach loops and wipes the per-session diag.
+  uint32_t everOutCount() const { return _everOut; }
 
   // On-device handshake trace (the TFT is the only debug surface). Counters and
   // milestone flags let P2 be diagnosed without USB serial.
@@ -59,15 +86,22 @@ class Protocol {
 
   uint8_t _report[100];
   uint8_t _request[100];
+  uint8_t _stream[64];  // dedicated buffer for hello / streamed 0x30 (loop task)
   uint8_t _addr[6];
+  uint8_t _serial[11];  // ASCII serial injected into factory SPI ROM (0x60)
+  bool _hasSerial;      // true once initIdentity() has generated _serial
 
   bool _vibrationEnabled;
   uint8_t _vibrationReport;
   uint8_t _vibrationIdx;
   bool _imuEnabled;
   bool _deviceInfoQueried;
+  bool _helloPending;  // announce 0x81 0x01 until the host sends its first OUT
+  bool _hidReady;      // stream 0x30 only after the handshake has advanced
+  bool _standardMode;  // host issued set_mode 0x30 -> begin streaming input
   uint32_t _timer;
   uint32_t _timestampMs;
+  uint32_t _everOut;  // sticky OUT-report total (survives reset())
   Diag _diag;
 
   void clearReport();
@@ -96,6 +130,7 @@ class Protocol {
 
   uint8_t* buildSubcommandReport();  // returns _report (BT-indexed, [0]=0xA1)
   uint8_t* buildHandshakeReport();   // returns _report (USB-indexed, [0]=0x81)
+  uint8_t* buildHelloReport();       // device-initiated 0x81 0x01 hello
 };
 
 }  // namespace procon

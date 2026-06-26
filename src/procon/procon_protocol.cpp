@@ -1,16 +1,37 @@
 #include "procon_protocol.h"
 
-#include <Arduino.h>
 #include <string.h>
+
+#include "esp_random.h"
+#include "esp_timer.h"
+
+// IDF replacement for Arduino millis() (the only framework dependency).
+static inline uint32_t millis() {
+  return (uint32_t)(esp_timer_get_time() / 1000);
+}
 
 namespace procon {
 
-const uint8_t Protocol::kVibOpts[4] = {0x0A, 0x0C, 0x0B, 0x09};
+const uint8_t Protocol::kVibOpts[4] = {0xA0, 0xB0, 0xC0, 0x90};
 
 Protocol::Protocol() {
   static const uint8_t kAddr[6] = {0x7C, 0xBB, 0x8A, 0x12, 0x34, 0x56};
   memcpy(_addr, kAddr, sizeof(_addr));
+  _hasSerial = false;
+  _everOut = 0;
   reset();
+}
+
+void Protocol::initIdentity(const uint8_t* mac) {
+  // Real device MAC (matches the reference esp_read_mac), used in the hello and
+  // device-info replies in natural byte order.
+  if (mac) memcpy(_addr, mac, sizeof(_addr));
+  // Random 11-char ASCII serial. First byte is a digit ('0'..'9' = 0x30..0x39,
+  // i.e. < 0x80) so the host treats it as a present serial (>= 0x80 = none).
+  for (int i = 0; i < (int)sizeof(_serial); i++) {
+    _serial[i] = (uint8_t)('0' + (esp_random() % 10));
+  }
+  _hasSerial = true;
 }
 
 void Protocol::reset() {
@@ -21,6 +42,9 @@ void Protocol::reset() {
   _vibrationIdx = 0x00;
   _imuEnabled = false;
   _deviceInfoQueried = false;
+  _helloPending = true;
+  _hidReady = false;
+  _standardMode = false;
   _timer = 0;
   _timestampMs = 0;
   _diag = Diag{};
@@ -37,10 +61,13 @@ void Protocol::onOutputReport(const uint8_t* data, uint16_t len) {
   memset(_request, 0x00, sizeof(_request));
   memcpy(_request, data, len);
 
+  _everOut++;  // sticky: proves the host enumerated + sent us an OUT report
   _diag.outCount++;
+  _helloPending = false;  // host is talking now; stop the unsolicited hello
   _diag.lastOutId = data[0];
   if (data[0] == 0x80 && len > 1) {
     _diag.lastHandshake = data[1];
+    if (data[1] == 0x04) _hidReady = true;  // host enabled USB HID
   } else if (data[0] == 0x01 && len > 10) {
     _diag.lastSubcommand = data[10];
   }
@@ -108,7 +135,6 @@ void Protocol::setSubcommandReply() {
 void Protocol::setBt() {
   _report[14] = 0x81;
   _report[15] = 0x01;
-  _report[16] = 0x03;
 }
 
 void Protocol::setDeviceInfo() {
@@ -119,8 +145,8 @@ void Protocol::setDeviceInfo() {
   _report[18] = 0x03;  // controller id: Pro Controller
   _report[19] = 0x02;  // unknown, always 2
   memcpy(_report + 20, _addr, 6);
-  _report[26] = 0x01;  // unknown, always 1
-  _report[27] = 0x01;  // colours stored in SPI
+  _report[26] = 0x03;  // unknown (finger563 uses 0x03)
+  _report[27] = 0x02;  // colour source: default colours (finger563 uses 0x02)
   _diag.gotDeviceInfo = true;
 }
 
@@ -130,76 +156,125 @@ void Protocol::setShipment() {
 }
 
 void Protocol::spiRead() {
-  const uint8_t addrTop = _request[12];
-  const uint8_t addrBottom = _request[11];
-  const uint8_t readLength = _request[15];
+  // Byte-for-byte port of finger563's SwitchPro::spi_read / spi_read_impl.
+  // The Switch reads calibration straight out of two flat factory/user ROM
+  // dumps; bank = addr_top, register offset = addr_bottom, length = sub[5].
+  const uint8_t bank = _request[12];        // subcommand[2]
+  const uint8_t reg = _request[11];         // subcommand[1]
+  const uint8_t readLength = _request[15];  // subcommand[5]
 
-  _report[14] = 0x90;        // ACK
-  _report[15] = 0x10;        // subcommand reply
-  _report[16] = addrBottom;  // echo address (low)
-  _report[17] = addrTop;     // echo address (high)
+  // Factory calibration bank 0x60xx (finger563 spi_rom_data_60).
+  static const uint8_t kSpiRom60[] = {
+      // 0x00: serial number (>= 0x80 first byte => no serial)
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+      0xFF, 0xFF, 0xFF, 0xFF,
+      // 0x10
+      0xFF, 0xFF, 0x03, 0xA0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02,
+      0xFF, 0xFF, 0xFF, 0xFF,
+      // 0x20: IMU factory calibration
+      0xF0, 0xFF, 0x89, 0x00, 0xF0, 0x01, 0x00, 0x40, 0x00, 0x40, 0x00, 0x40,
+      0xF9, 0xFF, 0x06, 0x00, 0x09, 0x00, 0xE7, 0x3B, 0xE7, 0x3B, 0xE7, 0x3B,
+      // 0x38-0x3C unused
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+      // 0x3D: left/right stick factory calibration
+      0xFF, 0xF7, 0x7F, 0x00, 0x08, 0x80, 0x00, 0x08, 0x80, 0x00, 0x08, 0x80,
+      0x00, 0x08, 0x80, 0xFF, 0xF7, 0x7F,
+      // 0x4F unused
+      0xFF,
+      // 0x50: colours (body, button, left grip, right grip) + unused
+      0x82, 0x82, 0x82, 0x0F, 0x0F, 0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+      0xFF, 0xFF, 0xFF, 0xFF,
+      // 0x60 unused
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+      0xFF, 0xFF, 0xFF, 0xFF,
+      // 0x70 unused
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+      0xFF, 0xFF, 0xFF, 0xFF,
+      // 0x80: IMU horizontal offset
+      0x50, 0xFD, 0x00, 0x00, 0xC6, 0x0F,
+      // stick device parameters pt.1
+      0x0F, 0x30, 0x61, 0x96, 0x30, 0xF3, 0xD4, 0x14, 0x54, 0x41, 0x15, 0x54,
+      0xC7, 0x79, 0x9C, 0x33, 0x36, 0x63,
+      // stick device parameters pt.2
+      0x0F, 0x30, 0x61, 0x96, 0x30, 0xF3, 0xD4, 0x14, 0x54, 0x41, 0x15, 0x54,
+      0xC7, 0x79, 0x9C, 0x33, 0x36, 0x63,
+      // unused
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+  // User calibration bank 0x80xx (finger563 spi_rom_data_80).
+  static const uint8_t kSpiRom80[] = {
+      // 0x00 unused
+      0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+      0xFF, 0xFF, 0xFF, 0xFF,
+      // 0x10: user left stick calibration (magic 0xB2 0xA1)
+      0xB2, 0xA1, 0xFF, 0xF7, 0x7F, 0x00, 0x08, 0x80, 0x00, 0x00, 0x00,
+      // 0x1B: user right stick calibration (magic 0xB2 0xA1)
+      0xB2, 0xA1, 0xFF, 0xF7, 0x7F, 0x00, 0x08, 0x80, 0x00, 0x00, 0x00,
+      // 0x26: user IMU calibration (magic 0xB2 0xA1)
+      0xB2, 0xA1, 0xBE, 0xFF, 0x3E, 0x00, 0xF0, 0x01, 0x00, 0x40, 0x00, 0x40,
+      0x00, 0x40, 0xFE, 0xFF, 0xFE, 0xFF, 0x08, 0x00, 0xE7, 0x3B, 0xE7, 0x3B,
+      0xE7, 0x3B};
+
+  const uint8_t* rom = nullptr;
+  size_t romSize = 0;
+  if (bank == 0x60) {
+    rom = kSpiRom60;
+    romSize = sizeof(kSpiRom60);
+  } else if (bank == 0x80) {
+    rom = kSpiRom80;
+    romSize = sizeof(kSpiRom80);
+  }
+
+  if (rom == nullptr) {
+    // finger563 NACKs unreadable banks (e.g. shipment) with 0x83 0x00.
+    _report[14] = 0x83;
+    _report[15] = 0x00;
+    return;
+  }
+
+  _report[14] = 0x90;       // ACK
+  _report[15] = 0x10;       // subcommand reply
+  _report[16] = reg;        // echo address (low)
+  _report[17] = bank;       // echo address (high)
+  _report[18] = 0x00;
+  _report[19] = 0x00;
   _report[20] = readLength;  // echo length
-
-  // Stick parameters; generally identical for both sticks.
-  static const uint8_t params[18] = {0x0F, 0x30, 0x61, 0x96, 0x30, 0xF3,
-                                     0xD4, 0x14, 0x54, 0x41, 0x15, 0x54,
-                                     0xC7, 0x79, 0x9C, 0x33, 0x36, 0x63};
-
-  if (addrTop == 0x60 && addrBottom == 0x00) {
-    // Serial number: 0xFF => "no serial number".
-    memset(_report + 21, 0xFF, 16);
-  } else if (addrTop == 0x60 && addrBottom == 0x50) {
-    // Controller colours.
-    memset(_report + 21, 0x32, 3);  // body
-    memset(_report + 24, 0xFF, 3);  // buttons
-    memset(_report + 27, 0xFF, 7);  // grips / spacer
-  } else if (addrTop == 0x80 && addrBottom == 0x10) {
-    // User calibration: null.
-    memset(_report + 21, 0xFF, 3);
-  } else if (addrTop == 0x60 && addrBottom == 0x3D) {
-    // Factory analog stick calibration.
-    static const uint8_t lCal[9] = {0xD4, 0x75, 0x61, 0xE5, 0x87,
-                                    0x7C, 0xEC, 0x55, 0x61};
-    static const uint8_t rCal[9] = {0x5D, 0xD8, 0x7F, 0x18, 0xE6,
-                                    0x61, 0x86, 0x65, 0x5D};
-    memcpy(_report + 21, lCal, sizeof(lCal));
-    memcpy(_report + 30, rCal, sizeof(rCal));
-    _report[39] = 0xFF;             // spacer
-    memset(_report + 40, 0x32, 3);  // body colour
-    memset(_report + 43, 0xFF, 3);  // button colour
+  for (uint8_t i = 0; i < readLength; i++) {
+    const size_t idx = (size_t)reg + i;
+    uint8_t b = (idx < romSize) ? rom[idx] : 0xFF;
+    // Inject the device serial into the factory ROM serial region (0x60 bank,
+    // 0x00-0x0F): digits at 0x00-0x0A, byte 0x0B left as template (0xFF), and
+    // 0x0C-0x0F zeroed -- matching the reference's serial layout.
+    if (bank == 0x60 && _hasSerial) {
+      if (idx < sizeof(_serial)) {
+        b = _serial[idx];
+      } else if (idx >= 0x0C && idx <= 0x0F) {
+        b = 0x00;
+      }
+    }
+    _report[21 + i] = b;
+  }
+  if (bank == 0x60 && reg <= 0x3D && (uint16_t)(reg + readLength) > 0x3D) {
     _diag.gotStickCal = true;
-  } else if (addrTop == 0x60 && addrBottom == 0x20) {
-    // Six-axis motion sensor factory calibration.
-    static const uint8_t saCal[24] = {
-        0xCC, 0x00, 0x40, 0x00, 0x91, 0x01, 0x00, 0x40, 0x00, 0x40, 0x00, 0x40,
-        0xE7, 0xFF, 0x0E, 0x00, 0xDC, 0xFF, 0x3B, 0x34, 0x3B, 0x34, 0x3B, 0x34};
-    memcpy(_report + 21, saCal, sizeof(saCal));
-  } else if (addrTop == 0x60 && addrBottom == 0x80) {
-    // Six-axis factory parameters.
-    _report[21] = 0x50;
-    _report[22] = 0xFD;
-    _report[23] = 0x00;
-    _report[24] = 0x00;
-    _report[25] = 0xC6;
-    _report[26] = 0x0F;
-    memcpy(_report + 27, params, sizeof(params));
-  } else if (addrTop == 0x60 && addrBottom == 0x98) {
-    // Stick device parameters 2 (duplicate of params 1).
-    memcpy(_report + 21, params, sizeof(params));
-  } else {
-    memset(_report + 21, 0xFF, readLength);
   }
 }
 
 void Protocol::setMode() {
   _report[14] = 0x80;
   _report[15] = 0x03;
+  // subcommand[1] (req[11]) selects the report mode: 0x30 standard, 0x31 nfc/ir,
+  // 0x3F simpleHID. Begin streaming standard input reports once set to 0x30.
+  if (_request[11] == 0x30) _standardMode = true;
   _diag.gotSetMode = true;
 }
 
 void Protocol::setTriggerButtons() {
   _report[14] = 0x83;
   _report[15] = 0x04;
+  // Trigger-buttons-elapsed-time payload: 7 little-endian uint16 (L, R, ZL, ZR,
+  // SL, SR, HOME) in 10ms units. We don't track press durations, so report all
+  // zeros -- which is exactly what the reference reports at handshake time.
+  memset(_report + 16, 0x00, 14);
 }
 
 void Protocol::toggleImu() {
@@ -214,7 +289,7 @@ void Protocol::imuSensitivity() {
 }
 
 void Protocol::enableVibration() {
-  _report[14] = 0x80;
+  _report[14] = 0x82;
   _report[15] = 0x48;
   _vibrationEnabled = true;
   _vibrationIdx = 0;
@@ -242,23 +317,41 @@ void Protocol::setNfcIrConfig() {
 }
 
 void Protocol::setUnknownSubcommand(uint8_t subId) {
-  _report[14] = 0x00;  // NACK
+  // finger563 deliberately ACKs unknown subcommands (0x80 + 0x03) instead of
+  // NACKing, to avoid getting stuck in an infinite loop "arguing" with the
+  // Switch (which would otherwise re-send and eventually drop the controller).
+  _report[14] = 0x80;
   _report[15] = subId;
+  _report[16] = 0x03;
 }
 
 // ---------------------------------------------------------------------------
 // Top-level report builders
 // ---------------------------------------------------------------------------
 
+uint8_t* Protocol::buildHelloReport() {
+  // Device-initiated hello (finger563 on_attach DEVICE_INIT_REPORT): announce as
+  // a Pro Controller with our MAC so the host begins driving the handshake.
+  // Wire: [0x81, 0x01, 0x00, 0x03, MAC[0..5]] (MAC in natural order). Built in
+  // the dedicated _stream buffer so it never races the USB-task response path.
+  memset(_stream, 0x00, sizeof(_stream));
+  _stream[0] = 0x81;
+  _stream[1] = 0x01;
+  _stream[3] = 0x03;  // device type: Pro Controller
+  memcpy(_stream + 4, _addr, 6);
+  return _stream;
+}
+
 uint8_t* Protocol::buildHandshakeReport() {
+  // Reply to a 0x80 host-init command. finger563 returns DEVICE_INIT_REPORT
+  // (0x81) echoing the command byte for every 0x80 sub-command; the 0x02
+  // handshake additionally echoes the host's full payload back.
   clearReport();
   _report[0] = 0x81;
-  _report[1] = _request[1];
-  if (_request[1] == 0x01) {
-    _report[3] = 0x03;  // device type
-    for (int i = 0; i < 6; i++) {
-      _report[4 + i] = _addr[5 - i];  // MAC, reversed
-    }
+  if (_request[1] == 0x02) {
+    for (int i = 1; i < 63; i++) _report[i] = _request[i];
+  } else {
+    _report[1] = _request[1];
   }
   return _report;
 }
@@ -269,9 +362,16 @@ uint8_t* Protocol::buildSubcommandReport() {
 
   if (_request[0] == 0x01) {
     switch (_request[10]) {
+      case 0x00:
+        // ONLY_CONTROLLER_STATE: ACK with 0x80 + 0x00 (finger563).
+        setSubcommandReply();
+        _report[14] = 0x80;
+        _report[15] = 0x00;
+        break;
       case 0x01: setSubcommandReply(); setBt(); break;
       case 0x02:
         _deviceInfoQueried = true;
+        _hidReady = true;
         setSubcommandReply();
         setDeviceInfo();
         break;
@@ -297,22 +397,66 @@ uint8_t* Protocol::buildSubcommandReport() {
   return _report;
 }
 
-const uint8_t* Protocol::generateUsbReport(size_t& outLen) {
-  outLen = 64;
-  const bool handshake =
-      (_request[0] == 0x80) &&
-      (_request[1] == 0x01 || _request[1] == 0x02 || _request[1] == 0x03);
-
-  const uint8_t* result;
-  if (handshake) {
-    result = buildHandshakeReport();  // USB-indexed, starts at 0x81
-  } else {
-    result = buildSubcommandReport() + 1;  // skip the 0xA1 BT prefix
+const uint8_t* Protocol::buildResponse(size_t& outLen) {
+  // Immediate reply to the OUT report just stored by onOutputReport(). finger563
+  // answers the 0x80 host-init family and 0x01 output/subcommand reports; a
+  // rumble-only report (0x10) gets no reply.
+  if (_request[0] == 0x80) {
+    const uint8_t* result = buildHandshakeReport();
+    clearRequest();
+    outLen = 64;
+    _diag.inCount++;
+    return result;
   }
+  if (_request[0] == 0x01) {
+    const uint8_t* result = buildSubcommandReport() + 1;  // skip 0xA1 BT prefix
+    clearRequest();
+    outLen = 64;
+    _diag.inCount++;
+    return result;
+  }
+  clearRequest();  // rumble-only / unhandled -> no reply
+  outLen = 0;
+  return _report;
+}
 
-  if (_request[0] != 0x00) clearRequest();
+const uint8_t* Protocol::takeHelloReport(size_t& outLen) {
+  _helloPending = false;  // one-shot
+  outLen = 64;
   _diag.inCount++;
-  return result;
+  return buildHelloReport();
+}
+
+const uint8_t* Protocol::buildStreamReport(size_t& outLen) {
+  // Unsolicited standard 0x30 input report, built in its own buffer so the main
+  // loop can stream it without racing the USB-task response path.
+  memset(_stream, 0x00, sizeof(_stream));
+  _stream[0] = 0x30;
+
+  const uint32_t now = millis();
+  if (_timestampMs == 0) _timestampMs = now;
+  const uint32_t deltaMs = now - _timestampMs;
+  _timer = (_timer + deltaMs * 4) & 0xFF;
+  _timestampMs = now;
+  _stream[1] = (uint8_t)_timer;
+
+  _stream[2] = 0x81;  // battery full + USB connected
+  _stream[3] = input.buttons[0];
+  _stream[4] = input.buttons[1];
+  _stream[5] = input.buttons[2];
+  packStick(input.lx, input.ly, &_stream[6]);
+  packStick(input.rx, input.ry, &_stream[9]);
+  _stream[12] = _vibrationReport;
+  if (_imuEnabled) {
+    static const uint8_t kImu[36] = {
+        0x75, 0xFD, 0xFD, 0xFF, 0x09, 0x10, 0x21, 0x00, 0xD5, 0xFF, 0xE0, 0xFF,
+        0x72, 0xFD, 0xF9, 0xFF, 0x0A, 0x10, 0x22, 0x00, 0xD5, 0xFF, 0xE0, 0xFF,
+        0x76, 0xFD, 0xFC, 0xFF, 0x09, 0x10, 0x23, 0x00, 0xD5, 0xFF, 0xE0, 0xFF};
+    memcpy(_stream + 13, kImu, sizeof(kImu));
+  }
+  outLen = 64;
+  _diag.inCount++;
+  return _stream;
 }
 
 }  // namespace procon

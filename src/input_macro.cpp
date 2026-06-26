@@ -1,6 +1,11 @@
 #include "input_macro.h"
 
-#include <Arduino.h>
+#include "esp_timer.h"
+
+// IDF replacement for Arduino millis() (the only framework dependency).
+static inline unsigned long millis() {
+  return (unsigned long)(esp_timer_get_time() / 1000);
+}
 
 namespace input_macro {
 

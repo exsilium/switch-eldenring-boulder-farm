@@ -1,0 +1,18 @@
+## Managed component dependencies (ESP-IDF).
+dependencies:
+  idf: ">=5.4"
+  # Latest esp_tinyusb. (It was NOT the enumeration blocker -- the FreeRTOS tick
+  # rate was; see sdkconfig.defaults CONFIG_FREERTOS_HZ=1000.)
+  espressif/esp_tinyusb: ">=2.0"
+  espressif/led_strip: ">=3.0"
+  lvgl/lvgl: "~9.3.0"
+  espressif/esp_lvgl_port: "^2.4"
+  # MINIMAL USB-ONLY BUILD: lvgl + esp_lvgl_port (and transitively esp_lcd) are
+  # temporarily removed to mirror the display-less reference. Re-add together
+  # with ui/display.cpp in src/CMakeLists.txt once the device enumerates.
+  # lvgl/lvgl: "~9.3.0"
+  # espressif/esp_lvgl_port: "^2.4"
+  # Upstream Switch Pro HID report descriptor generator. The descriptor is
+  # produced at compile time from this component so it tracks any future
+  # changes upstream instead of being hand-maintained.
+  espp/hid-rp: "^1.0.30"
