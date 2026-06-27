@@ -19,6 +19,8 @@
 
 #include <string.h>
 
+#include <array>
+
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_timer.h"
@@ -37,7 +39,7 @@
 #include "hid-rp-switch-pro.hpp"
 
 #include "procon/procon_protocol.h"
-#include "input_macro.h"
+#include "macros/boulder_macro.h"
 #include "ui/display.h"
 #include "ui/button.h"
 
@@ -63,7 +65,19 @@ static uint16_t s_last_input_len = 0;
 // Controller report descriptor at compile time -- exactly what the reference
 // esp-usb-ble-hid feeds its USB path. .size() drives the configuration
 // descriptor length below.
+//
+// NOTE: the hid-rp generator is heavy constexpr template metaprogramming that
+// the VS Code C/C++ IntelliSense engine (EDG) cannot constant-evaluate -- it
+// reports a bogus "expression must have a constant value". GCC evaluates it
+// correctly, so the squiggle is a false positive. Under IntelliSense ONLY
+// (`__INTELLISENSE__` is defined by the editor's parser, never by GCC) we swap
+// in a plain std::array stand-in of the known 209-byte size so the editor stops
+// complaining; every real build uses the generator.
+#ifdef __INTELLISENSE__
+static constexpr std::array<uint8_t, 209> kProDescriptor{};
+#else
 static constexpr auto kProDescriptor = espp::switch_pro_descriptor();
+#endif
 
 // IMPORTANT: TinyUSB on the ESP32-S3 (dwc2) DMAs EP0 control data, so every
 // descriptor handed to the host must live in DMA-capable INTERNAL RAM, not in
@@ -138,7 +152,7 @@ static void device_event_handler(tinyusb_event_t *event, void *arg) {
     case TINYUSB_EVENT_ATTACHED:
       ESP_LOGI(TAG, "USB mounted");
       gProtocol.reset();
-      input_macro::reset();
+      boulder_macro::reset();
       gMacroStarted = false;
       if (gProtocol.helloPending()) {
         size_t outLen = 0;
@@ -223,10 +237,10 @@ static void stream_task(void *arg) {
       // Controller accepted: run the (one-shot) input macro, then stream the
       // current input state to the console.
       if (!gMacroStarted) {
-        input_macro::start();
+        boulder_macro::start();
         gMacroStarted = true;
       }
-      input_macro::update(gProtocol.input);
+      boulder_macro::update(gProtocol.input);
 
       size_t outLen = 0;
       const uint8_t *rep = gProtocol.buildStreamReport(outLen);
@@ -351,7 +365,7 @@ static void app_loop_task(void *arg) {
     if (ev != button::Event::None) ui::onButton(ev);
     switch (ui::takeCommand()) {
       case ui::Command::RunMacro:
-        input_macro::reset();
+        boulder_macro::reset();
         gMacroStarted = false;  // stream_task re-arms it once streaming
         break;
       case ui::Command::Reattach:

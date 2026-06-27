@@ -51,7 +51,7 @@ lv_obj_t *gMenu = nullptr;     // full-screen menu overlay (hidden by default)
 lv_obj_t *gMenuRow[3] = {nullptr, nullptr, nullptr};
 
 constexpr int kMenuCount = 3;
-const char *kMenuLabels[kMenuCount] = {"Run Macro", "Reattach USB", "Back"};
+const char *kMenuLabels[kMenuCount] = {"Run Boulder", "Reattach USB", "Back"};
 const char *kFlagLabels[4] = {"DEV", "CAL", "MODE", "VIB"};
 
 enum class View { Status, Menu };

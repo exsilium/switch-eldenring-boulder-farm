@@ -1,4 +1,4 @@
-#include "input_macro.h"
+#include "macros/boulder_macro.h"
 
 #include "esp_timer.h"
 
@@ -7,7 +7,7 @@ static inline unsigned long millis() {
   return (unsigned long)(esp_timer_get_time() / 1000);
 }
 
-namespace input_macro {
+namespace boulder_macro {
 
 namespace {
 // Press duration for each D-pad tap, and the gap between LEFT and RIGHT.
@@ -73,4 +73,4 @@ bool update(procon::Input& in) {
   return justFinished;
 }
 
-}  // namespace input_macro
+}  // namespace boulder_macro
