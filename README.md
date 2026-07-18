@@ -64,4 +64,5 @@ pio run -e feather_s3_idf -t upload
 [`.github/workflows/build.yml`](.github/workflows/build.yml) builds the Docker
 image and runs the containerized firmware build on every push, pull request and
 manual dispatch, then uploads `firmware.elf` / `firmware.bin` as workflow
-artifacts. Platform/toolchain downloads are cached via the GitHub Actions cache.
+artifacts. The workflow reclaims runner disk space before building because the
+builder image bundles the full ESP-IDF toolchain (~10 GB).

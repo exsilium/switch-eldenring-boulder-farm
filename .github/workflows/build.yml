@@ -13,6 +13,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The builder image bakes in the full ESP-IDF toolchain (~10 GB). Hosted
+      # runners only ship ~14 GB free, so reclaim space from preinstalled
+      # toolchains we don't need before building to avoid "no space left".
+      - name: Free up disk space
+        run: |
+          echo "Disk before cleanup:"; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune --all --force || true
+          echo "Disk after cleanup:"; df -h /
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -22,10 +34,6 @@ jobs:
           context: .
           load: true
           tags: switch-firmware-builder:ci
-          # Cache the espressif32 platform + ESP-IDF toolchain download (baked
-          # into the image) across runs to keep build times reasonable.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Build firmware (pio run -e feather_s3_idf)
         run: |
