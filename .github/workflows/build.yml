@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # The builder image bakes in the full ESP-IDF toolchain (~10 GB). Hosted
       # runners only ship ~14 GB free, so reclaim space from preinstalled
@@ -26,10 +26,10 @@ jobs:
           echo "Disk after cleanup:"; df -h /
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build builder image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -41,7 +41,7 @@ jobs:
             switch-firmware-builder:ci
 
       - name: Upload firmware artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: firmware-feather_s3_idf
           path: |
