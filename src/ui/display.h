@@ -39,6 +39,14 @@ void setStatus(Phase phase, bool mounted, uint32_t in, uint32_t out,
 // 0..1 hold-progress bar (mirrors button::holdProgress()).
 void setHoldProgress(float pct);
 
+// Push the live controller input to the RUNNING overlay's Pro Controller
+// diagram, highlighting the currently pressed buttons and moving the analog
+// stick dots (thread-safe; a no-op unless the RUNNING overlay is visible).
+// `buttons` is the 3-byte report layout (see procon::Input); stick values are
+// 12-bit with centre procon::kStickCenter.
+void setControllerState(const uint8_t buttons[3], uint16_t lx, uint16_t ly,
+                        uint16_t rx, uint16_t ry);
+
 // Show a short diagnostic note on the status phase label (thread-safe). Used
 // to leave on-screen breadcrumbs while app_main does blocking work.
 void setNote(const char *text);

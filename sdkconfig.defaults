@@ -25,5 +25,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 
 # LVGL fonts used by the TFT UI (14 is on by default; the status screen uses 28).
+# 12 is used for the small button labels on the RUNNING controller diagram.
+CONFIG_LV_FONT_MONTSERRAT_12=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_28=y

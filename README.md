@@ -166,7 +166,9 @@ To add a row:
 
 2. Handle the new selection index in `activateMenu()`. Reuse the shared run
    flow — raising `Command::RunMacro` starts a run and opens the RUNNING
-   overlay (short tap = pause/resume, long hold = stop and return to the menu):
+overlay (short tap = pause/resume, long hold = stop and return to the menu).
+The RUNNING overlay draws a live Pro Controller diagram that highlights the
+buttons the macro is pressing and moves the analog stick dots in real time:
 
    ```cpp
    void activateMenu() {
