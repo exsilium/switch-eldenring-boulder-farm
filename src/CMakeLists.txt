@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.cpp"
+        "engine.cpp"
         "macros/boulder_macro.cpp"
         "procon/procon_protocol.cpp"
         "ui/button.cpp"
