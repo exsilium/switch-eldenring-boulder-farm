@@ -19,8 +19,10 @@ enum class Phase {
 // Commands the menu raises for the application layer to act on.
 enum class Command {
   None,
-  RunMacro,   // re-arm and run the input macro
-  Reattach,   // cycle the USB connection
+  RunMacro,     // start a (looping) macro run
+  Reattach,     // cycle the USB connection
+  TogglePause,  // pause / resume the active run
+  StopMacro,    // stop the active run and neutralise the controller
 };
 
 // Bring up the TFT (power, SPI, ST7789 panel) and LVGL, and build the UI.

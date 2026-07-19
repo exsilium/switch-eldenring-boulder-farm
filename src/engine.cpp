@@ -39,6 +39,7 @@ void Player::start() {
   _index = 0;
   _timing = false;
   _hasRelease = false;
+  _paused = false;
   _state = State::Running;
 }
 
@@ -47,11 +48,31 @@ void Player::reset() {
   _index = 0;
   _timing = false;
   _hasRelease = false;
+  _paused = false;
   _state = State::Idle;
+}
+
+void Player::pause() {
+  if (_state != State::Running || _paused) return;
+  _paused = true;
+  _pauseStart = millis();
+}
+
+void Player::resume() {
+  if (!_paused) return;
+  _paused = false;
+  // Push the in-progress timer forward by the paused span so no time is lost.
+  if (_timing) _timerStart += millis() - _pauseStart;
 }
 
 bool Player::update(procon::Input& in) {
   if (_state != State::Running) return false;
+
+  // While paused, keep streaming the frozen state without advancing timers.
+  if (_paused) {
+    writeState(in);
+    return false;
+  }
 
   const unsigned long now = millis();
 
@@ -101,9 +122,16 @@ bool Player::update(procon::Input& in) {
     }
   }
 
-  // End of sequence: neutralise everything and report completion this tick.
+  // End of sequence. Loop mode restarts from the top (neutralised) and keeps
+  // running; otherwise neutralise and report completion this tick.
   neutral();
   writeState(in);
+  if (_loop) {
+    _index = 0;
+    _timing = false;
+    _hasRelease = false;
+    return false;
+  }
   _state = State::Done;
   return true;
 }

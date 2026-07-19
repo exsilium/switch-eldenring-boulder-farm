@@ -146,11 +146,22 @@ constexpr Step StickCenter(Stick s) {
 // accumulated state into `in`. It returns true on the single tick the sequence
 // completes; on completion the controller is neutralised (buttons released,
 // sticks centred).
+//
+// Looping: with setLoop(true) the sequence restarts (neutralised, from the
+// first step) instead of completing, so it runs forever until reset(). In loop
+// mode update() never returns true and isDone() never becomes true.
+//
+// Pausing: pause() freezes the accumulated state in place -- the held buttons /
+// sticks keep streaming but timers stop advancing -- and resume() continues
+// exactly where it left off (any in-progress Wait/Tap keeps its remaining time).
 class Player {
  public:
   Player(const Step* steps, size_t count) : _steps(steps), _count(count) {}
   template <size_t N>
   explicit Player(const Step (&steps)[N]) : Player(steps, N) {}
+
+  // Restart the sequence from the first step forever instead of completing.
+  void setLoop(bool loop) { _loop = loop; }
 
   // Begin from the first step with a neutral controller state.
   void start();
@@ -158,8 +169,14 @@ class Player {
   // Force back to an inert, neutral state.
   void reset();
 
+  // Freeze / continue the sequence (no-ops unless running). While paused,
+  // update() keeps streaming the frozen state but does not advance.
+  void pause();
+  void resume();
+
   bool isRunning() const { return _state == State::Running; }
   bool isDone() const { return _state == State::Done; }
+  bool isPaused() const { return _paused; }
 
   // Advance the sequence and write the current state into `in`. Returns true on
   // the tick the sequence completes. No-op (returns false) when not running.
@@ -181,6 +198,7 @@ class Player {
   size_t _count;
   size_t _index = 0;
   State _state = State::Idle;
+  bool _loop = false;
 
   // Accumulated controller state.
   uint8_t _buttons[3] = {0x00, 0x00, 0x00};
@@ -195,6 +213,10 @@ class Player {
   Channel _releaseChannel = Channel::Y;
   unsigned long _timerStart = 0;
   uint32_t _timerMs = 0;
+
+  // Pause bookkeeping.
+  bool _paused = false;
+  unsigned long _pauseStart = 0;
 };
 
 }  // namespace macro

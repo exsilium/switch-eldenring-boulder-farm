@@ -50,13 +50,19 @@ lv_obj_t *gBar = nullptr;
 lv_obj_t *gMenu = nullptr;     // full-screen menu overlay (hidden by default)
 lv_obj_t *gMenuRow[3] = {nullptr, nullptr, nullptr};
 
+lv_obj_t *gRun = nullptr;       // full-screen "running" overlay (hidden by default)
+lv_obj_t *gRunTitle = nullptr;
+lv_obj_t *gRunHint = nullptr;
+lv_obj_t *gRunBar = nullptr;
+
 constexpr int kMenuCount = 3;
 const char *kMenuLabels[kMenuCount] = {"Run Boulder", "Reattach USB", "Back"};
 const char *kFlagLabels[4] = {"DEV", "CAL", "MODE", "VIB"};
 
-enum class View { Status, Menu };
+enum class View { Status, Menu, Running };
 View gView = View::Status;
 int gSel = 0;
+bool gRunPaused = false;
 
 volatile Command gPending = Command::None;
 
@@ -213,6 +219,50 @@ void buildMenu() {
   lv_obj_add_flag(gMenu, LV_OBJ_FLAG_HIDDEN);  // hidden until opened
 }
 
+void buildRunScreen() {
+  lv_obj_t *scr = lv_screen_active();
+  gRun = lv_obj_create(scr);
+  lv_obj_set_size(gRun, kHRes, kVRes);
+  lv_obj_align(gRun, LV_ALIGN_TOP_LEFT, 0, 0);
+  lv_obj_set_style_bg_color(gRun, lv_color_black(), 0);
+  lv_obj_set_style_bg_opa(gRun, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(gRun, 0, 0);
+  lv_obj_set_style_pad_all(gRun, 8, 0);
+  lv_obj_clear_flag(gRun, LV_OBJ_FLAG_SCROLLABLE);
+
+  gRunTitle = lv_label_create(gRun);
+  lv_obj_set_style_text_font(gRunTitle, &lv_font_montserrat_28, 0);
+  lv_obj_set_style_text_color(gRunTitle, lv_palette_main(LV_PALETTE_GREEN), 0);
+  lv_label_set_text(gRunTitle, "RUNNING");
+  lv_obj_align(gRunTitle, LV_ALIGN_TOP_LEFT, 0, 6);
+
+  gRunHint = lv_label_create(gRun);
+  lv_obj_set_style_text_font(gRunHint, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(gRunHint, lv_color_hex(0xBBBBBB), 0);
+  lv_label_set_text(gRunHint, "Tap: pause/resume\nHold: exit to menu");
+  lv_obj_align(gRunHint, LV_ALIGN_TOP_LEFT, 0, 46);
+
+  gRunBar = lv_bar_create(gRun);
+  lv_obj_set_size(gRunBar, kHRes - 24, 12);
+  lv_obj_align(gRunBar, LV_ALIGN_BOTTOM_MID, 0, -8);
+  lv_bar_set_range(gRunBar, 0, 100);
+  lv_bar_set_value(gRunBar, 0, LV_ANIM_OFF);
+  lv_obj_set_style_bg_color(gRunBar, lv_color_hex(0x222222), 0);
+  lv_obj_set_style_bg_color(gRunBar, lv_palette_main(LV_PALETTE_YELLOW),
+                            LV_PART_INDICATOR);
+
+  lv_obj_add_flag(gRun, LV_OBJ_FLAG_HIDDEN);  // hidden until a run starts
+}
+
+void renderRun() {
+  lv_label_set_text(gRunTitle, gRunPaused ? "PAUSED" : "RUNNING");
+  lv_obj_set_style_text_color(
+      gRunTitle,
+      gRunPaused ? lv_palette_main(LV_PALETTE_AMBER)
+                 : lv_palette_main(LV_PALETTE_GREEN),
+      0);
+}
+
 void renderMenuSelection() {
   for (int i = 0; i < kMenuCount; i++) {
     bool sel = (i == gSel);
@@ -235,9 +285,18 @@ void closeMenu() {
   lv_obj_add_flag(gMenu, LV_OBJ_FLAG_HIDDEN);
 }
 
+void openRun() {
+  gView = View::Running;
+  gRunPaused = false;
+  renderRun();
+  lv_bar_set_value(gRunBar, 0, LV_ANIM_OFF);
+  lv_obj_add_flag(gMenu, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_clear_flag(gRun, LV_OBJ_FLAG_HIDDEN);
+}
+
 void activateMenu() {
   switch (gSel) {
-    case 0: gPending = Command::RunMacro; closeMenu(); break;
+    case 0: gPending = Command::RunMacro; openRun(); break;
     case 1: gPending = Command::Reattach; closeMenu(); break;
     case 2: closeMenu(); break;
     default: break;
@@ -295,6 +354,7 @@ void begin(SelfTestStepFn onSelfTestStep) {
   if (lvgl_port_lock(0)) {
     buildStatusScreen();
     buildMenu();
+    buildRunScreen();
     lvgl_port_unlock();
   }
 #if DISPLAY_DEBUG
@@ -332,11 +392,15 @@ void setHoldProgress(float pct) {
   if (pct < 0.0f) pct = 0.0f;
   if (pct > 1.0f) pct = 1.0f;
   if (!lvgl_port_lock(0)) return;
-  lv_bar_set_value(gBar, (int)(pct * 100), LV_ANIM_OFF);
-  lv_obj_set_style_bg_color(
-      gBar, pct >= 1.0f ? lv_palette_main(LV_PALETTE_GREEN)
-                        : lv_palette_main(LV_PALETTE_YELLOW),
-      LV_PART_INDICATOR);
+  const int v = (int)(pct * 100);
+  const lv_color_t col = pct >= 1.0f ? lv_palette_main(LV_PALETTE_GREEN)
+                                     : lv_palette_main(LV_PALETTE_YELLOW);
+  lv_bar_set_value(gBar, v, LV_ANIM_OFF);
+  lv_obj_set_style_bg_color(gBar, col, LV_PART_INDICATOR);
+  if (gRunBar) {
+    lv_bar_set_value(gRunBar, v, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(gRunBar, col, LV_PART_INDICATOR);
+  }
   lvgl_port_unlock();
 }
 
@@ -353,12 +417,24 @@ void onButton(button::Event e) {
   if (!lvgl_port_lock(0)) return;
   if (gView == View::Status) {
     if (e == button::Event::Long) openMenu();
-  } else {  // Menu
+  } else if (gView == View::Menu) {
     if (e == button::Event::Short) {
       gSel = (gSel + 1) % kMenuCount;
       renderMenuSelection();
     } else if (e == button::Event::Long) {
       activateMenu();
+    }
+  } else {  // Running
+    if (e == button::Event::Short) {
+      // Toggle pause/resume; the app layer mirrors this on the macro.
+      gRunPaused = !gRunPaused;
+      renderRun();
+      gPending = Command::TogglePause;
+    } else if (e == button::Event::Long) {
+      // Hold exits the run and returns to the menu we came from.
+      gPending = Command::StopMacro;
+      lv_obj_add_flag(gRun, LV_OBJ_FLAG_HIDDEN);
+      openMenu();
     }
   }
   lvgl_port_unlock();

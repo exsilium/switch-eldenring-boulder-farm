@@ -18,8 +18,8 @@
 // (Down / Up / Wait / Tap / StickMove / StickCenter).
 //
 // Current (placeholder) sequence: D-pad LEFT tap -> 1 s wait -> D-pad RIGHT
-// tap, then neutral. Replace kSequence in boulder_macro.cpp with the real farm
-// routine.
+// tap, looped continuously. Replace kSequence in boulder_macro.cpp with the
+// real farm routine.
 namespace boulder_macro {
 
 // Begin the macro from the start.
@@ -34,5 +34,12 @@ bool update(procon::Input& in);
 
 bool isRunning();
 bool isDone();
+
+// The macro loops forever while running, so use these to control a run:
+// pause() freezes the current inputs in place, resume() continues, and
+// reset() stops it entirely and neutralises the controller.
+void pause();
+void resume();
+bool isPaused();
 
 }  // namespace boulder_macro
