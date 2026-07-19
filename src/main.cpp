@@ -53,7 +53,7 @@ static const char *TAG = "procon";
 // ---- Protocol + send state ----------------------------------------------
 static procon::Protocol gProtocol;
 static SemaphoreHandle_t gSendMutex;
-static volatile bool gMacroStarted = false;  // one-shot per connection
+static volatile bool gMacroRunning = false;  // set while a menu-started run is active
 
 // Last input report body (without the leading report-id byte) so a control
 // GET_REPORT(INPUT) can be answered instead of stalled (matches finger563).
@@ -153,7 +153,7 @@ static void device_event_handler(tinyusb_event_t *event, void *arg) {
       ESP_LOGI(TAG, "USB mounted");
       gProtocol.reset();
       boulder_macro::reset();
-      gMacroStarted = false;
+      gMacroRunning = false;
       if (gProtocol.helloPending()) {
         size_t outLen = 0;
         const uint8_t *hello = gProtocol.takeHelloReport(outLen);
@@ -162,7 +162,7 @@ static void device_event_handler(tinyusb_event_t *event, void *arg) {
       break;
     case TINYUSB_EVENT_DETACHED:
       ESP_LOGI(TAG, "USB unmounted");
-      gMacroStarted = false;
+      gMacroRunning = false;
       break;
     default:
       break;
@@ -234,13 +234,9 @@ static void stream_task(void *arg) {
   const TickType_t period = pdMS_TO_TICKS(8);  // ~120 Hz
   while (1) {
     if (tud_mounted() && gProtocol.streamingEnabled() && tud_hid_ready()) {
-      // Controller accepted: run the (one-shot) input macro, then stream the
-      // current input state to the console.
-      if (!gMacroStarted) {
-        boulder_macro::start();
-        gMacroStarted = true;
-      }
-      boulder_macro::update(gProtocol.input);
+      // Controller accepted: drive the input macro only while a run is active
+      // (started from the menu), then stream the current input state.
+      if (gMacroRunning) boulder_macro::update(gProtocol.input);
 
       size_t outLen = 0;
       const uint8_t *rep = gProtocol.buildStreamReport(outLen);
@@ -365,8 +361,19 @@ static void app_loop_task(void *arg) {
     if (ev != button::Event::None) ui::onButton(ev);
     switch (ui::takeCommand()) {
       case ui::Command::RunMacro:
-        boulder_macro::reset();
-        gMacroStarted = false;  // stream_task re-arms it once streaming
+        boulder_macro::start();  // begins a fresh, looping run
+        gMacroRunning = true;
+        break;
+      case ui::Command::TogglePause:
+        if (boulder_macro::isPaused()) {
+          boulder_macro::resume();
+        } else {
+          boulder_macro::pause();
+        }
+        break;
+      case ui::Command::StopMacro:
+        gMacroRunning = false;
+        boulder_macro::reset();  // neutralise the controller
         break;
       case ui::Command::Reattach:
         if (s_usbStarted) {

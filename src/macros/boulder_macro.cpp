@@ -1,76 +1,44 @@
 #include "macros/boulder_macro.h"
 
-#include "esp_timer.h"
-
-// IDF replacement for Arduino millis() (the only framework dependency).
-static inline unsigned long millis() {
-  return (unsigned long)(esp_timer_get_time() / 1000);
-}
+#include "engine.h"
 
 namespace boulder_macro {
 
 namespace {
-// Press duration for each D-pad tap, and the gap between LEFT and RIGHT.
-constexpr unsigned long kPressMs = 100;
-constexpr unsigned long kGapMs = 1000;
+// Placeholder sequence (NOT the real Lenne's Rise routine): D-pad LEFT tap ->
+// 1 s wait -> D-pad RIGHT tap, looped continuously. Authoring a new macro is
+// just copying this table and editing the steps -- see engine.h for the full
+// list of channels and factory helpers.
+static constexpr macro::Step kSequence[] = {
+    macro::Tap(macro::Channel::Left, 100),
+    macro::Wait(1000),
+    macro::Tap(macro::Channel::Right, 100),
+};
 
-enum class Phase { Idle, PressLeft, Gap, PressRight, Done };
-
-Phase gPhase = Phase::Idle;
-unsigned long gPhaseStart = 0;
-
-void enter(Phase p) {
-  gPhase = p;
-  gPhaseStart = millis();
+// Loop the sequence: a run keeps repeating until reset() stops it.
+macro::Player makePlayer() {
+  macro::Player p(kSequence);
+  p.setLoop(true);
+  return p;
 }
+
+macro::Player gPlayer = makePlayer();
 }  // namespace
 
-void start() { enter(Phase::PressLeft); }
+void start() { gPlayer.start(); }
 
-void reset() { gPhase = Phase::Idle; }
+void reset() { gPlayer.reset(); }
 
-bool isRunning() {
-  return gPhase != Phase::Idle && gPhase != Phase::Done;
-}
+bool update(procon::Input& in) { return gPlayer.update(in); }
 
-bool isDone() { return gPhase == Phase::Done; }
+bool isRunning() { return gPlayer.isRunning(); }
 
-bool update(procon::Input& in) {
-  if (!isRunning()) return false;
+bool isDone() { return gPlayer.isDone(); }
 
-  const unsigned long elapsed = millis() - gPhaseStart;
-  bool justFinished = false;
+void pause() { gPlayer.pause(); }
 
-  switch (gPhase) {
-    case Phase::PressLeft:
-      in.buttons[2] = (in.buttons[2] & ~procon::kDpadRight) | procon::kDpadLeft;
-      if (elapsed >= kPressMs) {
-        in.buttons[2] &= ~procon::kDpadLeft;
-        enter(Phase::Gap);
-      }
-      break;
+void resume() { gPlayer.resume(); }
 
-    case Phase::Gap:
-      in.buttons[2] &= ~(procon::kDpadLeft | procon::kDpadRight);
-      if (elapsed >= kGapMs) {
-        enter(Phase::PressRight);
-      }
-      break;
-
-    case Phase::PressRight:
-      in.buttons[2] = (in.buttons[2] & ~procon::kDpadLeft) | procon::kDpadRight;
-      if (elapsed >= kPressMs) {
-        in.buttons[2] &= ~procon::kDpadRight;
-        gPhase = Phase::Done;
-        justFinished = true;
-      }
-      break;
-
-    default:
-      break;
-  }
-
-  return justFinished;
-}
+bool isPaused() { return gPlayer.isPaused(); }
 
 }  // namespace boulder_macro
