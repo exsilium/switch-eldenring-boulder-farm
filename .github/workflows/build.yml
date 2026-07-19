@@ -1,0 +1,50 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Docker firmware build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # The builder image bakes in the full ESP-IDF toolchain (~10 GB). Hosted
+      # runners only ship ~14 GB free, so reclaim space from preinstalled
+      # toolchains we don't need before building to avoid "no space left".
+      - name: Free up disk space
+        run: |
+          echo "Disk before cleanup:"; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune --all --force || true
+          echo "Disk after cleanup:"; df -h /
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build builder image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: switch-firmware-builder:ci
+
+      - name: Build firmware (pio run -e feather_s3_idf)
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/project" \
+            switch-firmware-builder:ci
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: firmware-feather_s3_idf
+          path: |
+            .pio/build/feather_s3_idf/firmware.elf
+            .pio/build/feather_s3_idf/firmware.bin
+          if-no-files-found: error

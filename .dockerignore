@@ -1,0 +1,20 @@
+# Keep the Docker build context small. The container regenerates all of these.
+.pio
+.pio-core
+managed_components/
+dependencies.lock
+sdkconfig.feather_s3_idf
+
+.git
+.gitignore
+docs
+
+# Build launchers / CI are not needed inside the build context.
+build.sh
+build.ps1
+build.cmd
+
+# Logs and editor cruft.
+*.log
+build.log
+.vscode
