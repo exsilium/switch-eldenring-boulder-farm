@@ -47,6 +47,9 @@ void Protocol::reset() {
   _standardMode = false;
   _timer = 0;
   _timestampMs = 0;
+  _rumbleL = 0;
+  _rumbleR = 0;
+  _rumbleMs = 0;
   _diag = Diag{};
   input.reset();
 }
@@ -70,7 +73,45 @@ void Protocol::onOutputReport(const uint8_t* data, uint16_t len) {
     if (data[1] == 0x04) _hidReady = true;  // host enabled USB HID
   } else if (data[0] == 0x01 && len > 10) {
     _diag.lastSubcommand = data[10];
+    // 0x01 output reports carry the 8-byte HD-rumble payload at offset 2
+    // (len > 10 guarantees the full left+right payload at bytes 2..9).
+    decodeRumble(data + 2);
+  } else if (data[0] == 0x10 && len >= 10) {
+    // 0x10 rumble-only reports share the 0x01 layout ([id][packet#][8-byte
+    // rumble]), so the rumble payload is at the same offset 2.
+    decodeRumble(data + 2);
   }
+  decayRumble();
+}
+
+// Decay the held rumble amplitudes toward zero so a brief packet stays visible
+// for a few poll cycles but a stream that stops is reflected quickly. Linear
+// decay of ~4 units/ms empties a full-scale (255) reading in ~64 ms.
+void Protocol::decayRumble() {
+  const uint32_t now = millis();
+  if (_rumbleMs == 0) {
+    _rumbleMs = now;
+    return;
+  }
+  const uint32_t dt = now - _rumbleMs;
+  _rumbleMs = now;
+  const uint32_t drop = dt * 4;
+  _rumbleL = (drop >= _rumbleL) ? 0 : (uint16_t)(_rumbleL - drop);
+  _rumbleR = (drop >= _rumbleR) ? 0 : (uint16_t)(_rumbleR - drop);
+  _diag.rumbleL = _rumbleL;
+  _diag.rumbleR = _rumbleR;
+}
+
+// Decode the 8-byte payload (4 bytes left, 4 bytes right) and hold the peak:
+// take the max of the freshly decoded amplitude and the current decayed value
+// so short bursts are observable while decayRumble() bleeds them off over time.
+void Protocol::decodeRumble(const uint8_t* rumble) {
+  const uint16_t l = decodeRumbleAmplitude(rumble);
+  const uint16_t r = decodeRumbleAmplitude(rumble + 4);
+  if (l > _rumbleL) _rumbleL = l;
+  if (r > _rumbleR) _rumbleR = r;
+  _diag.rumbleL = _rumbleL;
+  _diag.rumbleR = _rumbleR;
 }
 
 // ---------------------------------------------------------------------------

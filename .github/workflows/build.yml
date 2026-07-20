@@ -6,6 +6,24 @@ on:
   workflow_dispatch:
 
 jobs:
+  host-tests:
+    name: Host unit tests (native)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Run engine + rumble unit tests
+        run: pio test -e native
+
   build:
     name: Docker firmware build
     runs-on: ubuntu-latest

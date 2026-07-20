@@ -51,6 +51,19 @@ void setControllerState(const uint8_t buttons[3], uint16_t lx, uint16_t ly,
 // to leave on-screen breadcrumbs while app_main does blocking work.
 void setNote(const char *text);
 
+// Push a short macro-written status label onto the RUNNING overlay (e.g.
+// "Death Detected"). Thread-safe; a no-op unless the RUNNING overlay is
+// visible. Pass "" or nullptr to clear it. Kept in a small fixed buffer so the
+// UI task never churns the heap.
+void setRunStatus(const char *text);
+
+// Push the decoded per-side host-rumble amplitude (0..255) to the RUNNING
+// overlay's rumble meters. Thread-safe; a no-op unless the RUNNING overlay is
+// visible; repaints only on change. The meters turn red once an amplitude
+// crosses procon::kRumbleMin, and the highest value seen during the run is
+// printed next to each bar (reset on (re)start and on pause).
+void setRumble(uint16_t left, uint16_t right);
+
 // Feed a button event into the UI (menu navigation / selection).
 void onButton(button::Event e);
 

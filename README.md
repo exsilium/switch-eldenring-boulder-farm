@@ -78,6 +78,7 @@ Author steps with these `constexpr` factory helpers (from `src/engine.h`):
 | `Wait(ms)` | Hold the current accumulated state for `ms` milliseconds. |
 | `Tap(Channel, ms)` | Convenience for `Down(c)`, `Wait(ms)`, `Up(c)`. |
 | `StickMove(Stick, x, y)` | Set one analog stick instantly (12-bit, centre `0x800`). |
+| `StickAxis(Stick, Axis, value)` | Set a single stick axis, holding the other at its current value. |
 | `StickCenter(Stick)` | Recentre one analog stick. |
 
 Durations are real milliseconds (measured with the `esp_timer` hardware clock,
@@ -96,7 +97,55 @@ Sticks  : StickMove(Stick::Left/Right, x, y), StickCenter(Stick::Left/Right)
 (`Stick::Left` / `Stick::Right` select which analog stick a stick op targets.
 The full byte/bit table for each `Channel` is documented in `src/engine.h`.)
 
-### 1. Write the macro file
+### Feedback-driven interrupts (rumble / "death detection")
+
+Beyond the linear step table, a macro can react to controller feedback and
+abort mid-sequence. The firmware decodes the host's HD-rumble output into a
+per-side amplitude (`0..255`, left ≈ `RUMBLE_A`, right ≈ `RUMBLE_B`; see
+`procon::Protocol::rumbleLeft()` / `rumbleRight()` and
+`procon::decodeRumbleAmplitude` / `procon::kRumbleMin`). The run loop feeds those
+values into the player each tick with `feedRumble(left, right)`, so the engine
+never reaches into the USB layer itself.
+
+Arm a condition-driven abort with `setInterrupt(pred, resetSeq)`. While the main
+sequence runs, `pred(const macro::TickContext&)` is polled every tick; when it
+returns `true` the controller is neutralised, the **interrupt (reset) sequence**
+runs to completion, and then the main sequence resumes (loop mode) or the run
+stops (one-shot). This maps 1:1 onto the reference GPC's
+`presumeDead → reset_sequence` behaviour. `TickContext` carries `rumbleLeft`,
+`rumbleRight`, and `elapsedMs` (time since the active sequence started).
+
+```cpp
+static constexpr macro::Step kMain[]  = { /* ... farm loop ... */ };
+static constexpr macro::Step kReset[] = { /* ... reload the Site of Grace ... */ };
+
+// Fire when either actuator crosses the death threshold.
+bool deathDetected(const macro::TickContext& c) {
+  return c.rumbleLeft  >= procon::kRumbleMin ||
+         c.rumbleRight >= procon::kRumbleMin;
+}
+
+macro::Player makePlayer() {
+  macro::Player p(kMain);
+  p.setLoop(true);
+  p.setInterrupt(deathDetected, kReset);   // abort main + run kReset on death
+  return p;
+}
+```
+
+Expose `feedRumble()` and `isInterrupting()` through the macro's namespace so the
+runner can feed rumble each tick (before `update()`) and surface the state.
+
+### On-screen run status label
+
+`ui::setRunStatus(const char *text)` writes a short label onto the RUNNING
+overlay (thread-safe; a no-op unless that overlay is visible; pass `""` to
+clear). The shipped Boulder macro shows `"Death Detected"` while its interrupt
+runs and clears it on (re)start. The overlay also draws live per-side rumble
+meters (fed by `ui::setRumble(left, right)`) that turn red past `kRumbleMin`,
+and a cassette-style play/pause glyph in place of the old RUNNING/PAUSED words.
+
+
 
 Copy [`src/macros/boulder_macro.{h,cpp}`](src/macros) to a new name (e.g.
 `cinder_macro`), rename the namespace, and edit the `kSequence` table. The
@@ -208,8 +257,16 @@ does.
 
 ## Continuous integration
 
-[`.github/workflows/build.yml`](.github/workflows/build.yml) builds the Docker
-image and runs the containerized firmware build on every push, pull request and
-manual dispatch, then uploads `firmware.elf` / `firmware.bin` as workflow
-artifacts. The workflow reclaims runner disk space before building because the
-builder image bundles the full ESP-IDF toolchain (~10 GB).
+[`.github/workflows/build.yml`](.github/workflows/build.yml) runs two jobs on
+every push, pull request and manual dispatch:
+
+- **Host unit tests** — `pio test -e native` runs the dependency-light engine +
+  rumble-decode tests under [`test/`](test) on the PlatformIO `native` platform
+  (no hardware/ESP-IDF needed). See [`test/test_engine`](test/test_engine) and
+  [`test/test_rumble`](test/test_rumble); the host build compiles only
+  `src/engine.cpp` (via `build_src_filter`) with an injected virtual clock.
+- **Docker firmware build** — builds the Docker image and runs the containerized
+  firmware build, then uploads `firmware.elf` / `firmware.bin` as workflow
+  artifacts. The workflow reclaims runner disk space before building because the
+  builder image bundles the full ESP-IDF toolchain (~10 GB).
+

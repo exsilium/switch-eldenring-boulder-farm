@@ -1,5 +1,7 @@
 #include "ui/display.h"
 
+#include <string.h>
+
 #include "procon/procon_reports.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
@@ -52,8 +54,18 @@ lv_obj_t *gMenu = nullptr;     // full-screen menu overlay (hidden by default)
 lv_obj_t *gMenuRow[3] = {nullptr, nullptr, nullptr};
 
 lv_obj_t *gRun = nullptr;       // full-screen "running" overlay (hidden by default)
-lv_obj_t *gRunTitle = nullptr;
+lv_obj_t *gRunTitle = nullptr;  // play / pause glyph (cassette-style)
+lv_obj_t *gRunStatus = nullptr; // macro-written status label (e.g. Death Detected)
 lv_obj_t *gRunBar = nullptr;
+
+// ---- Per-side rumble meters (on the RUNNING overlay) ---------------------
+lv_obj_t *gRumL = nullptr;     // left (RUMBLE_A) amplitude bar
+lv_obj_t *gRumR = nullptr;     // right (RUMBLE_B) amplitude bar
+lv_obj_t *gRumLVal = nullptr;  // left run-max numeric label
+lv_obj_t *gRumRVal = nullptr;  // right run-max numeric label
+uint16_t gPrevRumL = 0xFFFF, gPrevRumR = 0xFFFF;  // last pushed, for repaint-on-change
+uint16_t gMaxRumL = 0, gMaxRumR = 0;              // highest seen this run
+bool gRumLHot = false, gRumRHot = false;          // last threshold state
 
 // ---- Live Pro Controller diagram (on the RUNNING overlay) ----------------
 // Each drawn digital input maps to a bit in the standard input report's three
@@ -323,8 +335,16 @@ void buildRunScreen() {
   gRunTitle = lv_label_create(gRun);
   lv_obj_set_style_text_font(gRunTitle, &lv_font_montserrat_14, 0);
   lv_obj_set_style_text_color(gRunTitle, lv_palette_main(LV_PALETTE_GREEN), 0);
-  lv_label_set_text(gRunTitle, "RUNNING");
+  lv_label_set_text(gRunTitle, LV_SYMBOL_PLAY);  // cassette-style play glyph
   lv_obj_align(gRunTitle, LV_ALIGN_TOP_LEFT, 6, 1);
+
+  // Macro-written status label (e.g. "Death Detected"), to the right of the
+  // play/pause glyph so a longer message has room along the top row.
+  gRunStatus = lv_label_create(gRun);
+  lv_obj_set_style_text_font(gRunStatus, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(gRunStatus, lv_palette_main(LV_PALETTE_RED), 0);
+  lv_label_set_text(gRunStatus, "");
+  lv_obj_align(gRunStatus, LV_ALIGN_TOP_LEFT, 26, 1);
 
   // Controller diagram area (own container so child coords start at 0,0).
   gPad = lv_obj_create(gRun);
@@ -339,11 +359,12 @@ void buildRunScreen() {
   const lv_font_t *f14 = &lv_font_montserrat_14;
 
   gCtrlCount = 0;
-  // Shoulder / trigger buttons (byte 2: L/ZL, byte 0: R/ZR).
-  addBtn(gPad, 2, 0, 46, 14, 3, f12, "ZL", 2, 0x80);
-  addBtn(gPad, 2, 16, 46, 14, 3, f12, "L", 2, 0x40);
-  addBtn(gPad, 192, 0, 46, 14, 3, f12, "ZR", 0, 0x80);
-  addBtn(gPad, 192, 16, 46, 14, 3, f12, "R", 0, 0x40);
+  // Shoulder / trigger buttons (byte 2: L/ZL, byte 0: R/ZR). Shifted 8px inward
+  // from the screen edges to leave room for the vertical rumble meters.
+  addBtn(gPad, 10, 0, 46, 14, 3, f12, "ZL", 2, 0x80);
+  addBtn(gPad, 10, 16, 46, 14, 3, f12, "L", 2, 0x40);
+  addBtn(gPad, 184, 0, 46, 14, 3, f12, "ZR", 0, 0x80);
+  addBtn(gPad, 184, 16, 46, 14, 3, f12, "R", 0, 0x40);
   // Left analog stick ring (click = byte 1 0x08).
   addBtn(gPad, 12, 38, 44, 44, LV_RADIUS_CIRCLE, f12, nullptr, 1, 0x08);
   // D-pad (byte 2).
@@ -378,16 +399,67 @@ void buildRunScreen() {
   lv_obj_set_style_bg_color(gRunBar, lv_palette_main(LV_PALETTE_YELLOW),
                             LV_PART_INDICATOR);
 
+  // Per-side rumble meters: thin vertical bars hugging the left/right edges
+  // (children of gRun so they paint over the pad). 0..255 amplitude; the
+  // indicator flips to red once it crosses procon::kRumbleMin. Run-max value is
+  // printed near each bar. The shoulder buttons were shifted inward to clear
+  // these columns.
+  auto makeRumbleBar = [&](int x) {
+    lv_obj_t *b = lv_bar_create(gRun);
+    lv_obj_set_size(b, 5, 84);
+    lv_obj_set_pos(b, x, 20);
+    lv_bar_set_range(b, 0, 255);
+    lv_bar_set_value(b, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(b, lv_color_hex(0x222222), 0);
+    lv_obj_set_style_bg_color(b, lv_palette_main(LV_PALETTE_GREEN),
+                              LV_PART_INDICATOR);
+    return b;
+  };
+  gRumL = makeRumbleBar(0);
+  gRumR = makeRumbleBar(kHRes - 5);
+
+  auto makeRumbleVal = [&](int x) {
+    lv_obj_t *l = lv_label_create(gRun);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(0xBBBBBB), 0);
+    lv_label_set_text(l, "0");
+    lv_obj_set_pos(l, x, 106);
+    return l;
+  };
+  gRumLVal = makeRumbleVal(2);
+  gRumRVal = makeRumbleVal(kHRes - 28);
+
   lv_obj_add_flag(gRun, LV_OBJ_FLAG_HIDDEN);  // hidden until a run starts
 }
 
 void renderRun() {
-  lv_label_set_text(gRunTitle, gRunPaused ? "PAUSED" : "RUNNING");
+  // Cassette-style play / pause glyph, keeping the green (running) / amber
+  // (paused) colour coding that the RUNNING/PAUSED words used to carry.
+  lv_label_set_text(gRunTitle, gRunPaused ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
   lv_obj_set_style_text_color(
       gRunTitle,
       gRunPaused ? lv_palette_main(LV_PALETTE_AMBER)
                  : lv_palette_main(LV_PALETTE_GREEN),
       0);
+}
+
+// Reset the rumble meters + run-max readouts to zero (on run start / pause).
+void resetRumbleMeters() {
+  gPrevRumL = gPrevRumR = 0xFFFF;
+  gMaxRumL = gMaxRumR = 0;
+  gRumLHot = gRumRHot = false;
+  if (gRumL) {
+    lv_bar_set_value(gRumL, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(gRumL, lv_palette_main(LV_PALETTE_GREEN),
+                              LV_PART_INDICATOR);
+  }
+  if (gRumR) {
+    lv_bar_set_value(gRumR, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(gRumR, lv_palette_main(LV_PALETTE_GREEN),
+                              LV_PART_INDICATOR);
+  }
+  if (gRumLVal) lv_label_set_text(gRumLVal, "0");
+  if (gRumRVal) lv_label_set_text(gRumRVal, "0");
 }
 
 void renderMenuSelection() {
@@ -416,6 +488,8 @@ void openRun() {
   gView = View::Running;
   gRunPaused = false;
   renderRun();
+  if (gRunStatus) lv_label_set_text(gRunStatus, "");  // clear stale status
+  resetRumbleMeters();
   lv_bar_set_value(gRunBar, 0, LV_ANIM_OFF);
   // Force the next controller push to repaint every chip from a clean slate.
   gPrevBtn[0] = gPrevBtn[1] = gPrevBtn[2] = 0xFF;
@@ -569,6 +643,67 @@ void setNote(const char *text) {
   lvgl_port_unlock();
 }
 
+void setRunStatus(const char *text) {
+  if (!gRunStatus) return;
+  if (gView != View::Running) return;  // no-op unless the RUNNING overlay is up
+  // Small fixed buffer so the UI task never churns the heap; repaint on change.
+  static char buf[24] = {0};
+  char next[24];
+  size_t i = 0;
+  if (text) {
+    for (; text[i] && i < sizeof(next) - 1; i++) next[i] = text[i];
+  }
+  next[i] = '\0';
+  if (strncmp(next, buf, sizeof(buf)) == 0) return;
+  if (!lvgl_port_lock(0)) return;
+  memcpy(buf, next, sizeof(next));
+  lv_label_set_text(gRunStatus, buf);
+  lvgl_port_unlock();
+}
+
+void setRumble(uint16_t left, uint16_t right) {
+  if (!gRumL || !gRumR) return;
+  if (gView != View::Running) return;  // no-op unless the RUNNING overlay is up
+  if (left > 255) left = 255;
+  if (right > 255) right = 255;
+  bool maxChanged = false;
+  if (left > gMaxRumL) {
+    gMaxRumL = left;
+    maxChanged = true;
+  }
+  if (right > gMaxRumR) {
+    gMaxRumR = right;
+    maxChanged = true;
+  }
+  if (left == gPrevRumL && right == gPrevRumR && !maxChanged) return;
+  if (!lvgl_port_lock(0)) return;
+  const bool lHot = left >= procon::kRumbleMin;
+  const bool rHot = right >= procon::kRumbleMin;
+  lv_bar_set_value(gRumL, left, LV_ANIM_OFF);
+  lv_bar_set_value(gRumR, right, LV_ANIM_OFF);
+  if (lHot != gRumLHot) {
+    lv_obj_set_style_bg_color(gRumL,
+                              lHot ? lv_palette_main(LV_PALETTE_RED)
+                                   : lv_palette_main(LV_PALETTE_GREEN),
+                              LV_PART_INDICATOR);
+    gRumLHot = lHot;
+  }
+  if (rHot != gRumRHot) {
+    lv_obj_set_style_bg_color(gRumR,
+                              rHot ? lv_palette_main(LV_PALETTE_RED)
+                                   : lv_palette_main(LV_PALETTE_GREEN),
+                              LV_PART_INDICATOR);
+    gRumRHot = rHot;
+  }
+  if (maxChanged) {
+    lv_label_set_text_fmt(gRumLVal, "%u", (unsigned)gMaxRumL);
+    lv_label_set_text_fmt(gRumRVal, "%u", (unsigned)gMaxRumR);
+  }
+  gPrevRumL = left;
+  gPrevRumR = right;
+  lvgl_port_unlock();
+}
+
 void onButton(button::Event e) {
   if (e == button::Event::None) return;
   if (!lvgl_port_lock(0)) return;
@@ -586,6 +721,7 @@ void onButton(button::Event e) {
       // Toggle pause/resume; the app layer mirrors this on the macro.
       gRunPaused = !gRunPaused;
       renderRun();
+      resetRumbleMeters();  // pausing resets the run-max readouts
       gPending = Command::TogglePause;
     } else if (e == button::Event::Long) {
       // Hold exits the run and returns to the menu we came from.
