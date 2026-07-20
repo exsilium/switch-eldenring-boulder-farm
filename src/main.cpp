@@ -388,6 +388,14 @@ static void app_loop_task(void *arg) {
     }
     ui::setHoldProgress(button::isDown() ? button::holdProgress() : 0.0f);
 
+    // Mirror the live controller input onto the RUNNING overlay's Pro
+    // Controller diagram (a no-op unless that overlay is visible). Copy the
+    // shared input once; a torn read here is only a cosmetic 1-frame glitch.
+    {
+      const procon::Input in = gProtocol.input;
+      ui::setControllerState(in.buttons, in.lx, in.ly, in.rx, in.ry);
+    }
+
     // Status + NeoPixel refresh at ~5 Hz.
     const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
     if (now - lastStatusMs >= 200) {

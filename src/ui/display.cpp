@@ -1,5 +1,6 @@
 #include "ui/display.h"
 
+#include "procon/procon_reports.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_lcd_panel_io.h"
@@ -52,8 +53,33 @@ lv_obj_t *gMenuRow[3] = {nullptr, nullptr, nullptr};
 
 lv_obj_t *gRun = nullptr;       // full-screen "running" overlay (hidden by default)
 lv_obj_t *gRunTitle = nullptr;
-lv_obj_t *gRunHint = nullptr;
 lv_obj_t *gRunBar = nullptr;
+
+// ---- Live Pro Controller diagram (on the RUNNING overlay) ----------------
+// Each drawn digital input maps to a bit in the standard input report's three
+// button bytes (see procon::Input / macro::Channel). When that bit is set the
+// chip is highlighted; the analog sticks are shown as dots that move.
+struct CtrlBtn {
+  lv_obj_t *box;
+  lv_obj_t *lbl;    // may be null (D-pad / stick rings have no label)
+  uint8_t byteIdx;  // index into buttons[3]
+  uint8_t mask;     // bit within that byte
+};
+constexpr int kCtrlMax = 24;
+CtrlBtn gCtrl[kCtrlMax];
+int gCtrlCount = 0;
+
+lv_obj_t *gPad = nullptr;   // container holding the controller diagram
+lv_obj_t *gLDot = nullptr;  // left analog stick dot
+lv_obj_t *gRDot = nullptr;  // right analog stick dot
+
+// Fixed centres (within gPad) of the two analog stick rings; the dots rest here.
+constexpr int kLCx = 34, kLCy = 60;
+constexpr int kRCx = 150, kRCy = 86;
+
+// Last pushed state, so setControllerState() only repaints on a change.
+uint8_t gPrevBtn[3] = {0xFF, 0xFF, 0xFF};
+uint16_t gPrevLx = 0xFFFF, gPrevLy = 0xFFFF, gPrevRx = 0xFFFF, gPrevRy = 0xFFFF;
 
 constexpr int kMenuCount = 3;
 const char *kMenuLabels[kMenuCount] = {"Run Boulder", "Reattach USB", "Back"};
@@ -219,6 +245,70 @@ void buildMenu() {
   lv_obj_add_flag(gMenu, LV_OBJ_FLAG_HIDDEN);  // hidden until opened
 }
 
+// ---- Controller diagram helpers ------------------------------------------
+void chipStyle(lv_obj_t *o, int radius) {
+  lv_obj_set_style_pad_all(o, 0, 0);
+  lv_obj_set_style_radius(o, radius, 0);
+  lv_obj_set_style_border_width(o, 1, 0);
+  lv_obj_set_style_border_color(o, lv_color_hex(0x555555), 0);
+  lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
+  lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+}
+
+// Create one button chip on gPad and register it against a report bit.
+lv_obj_t *addBtn(lv_obj_t *parent, int x, int y, int w, int h, int radius,
+                 const lv_font_t *font, const char *txt, uint8_t byteIdx,
+                 uint8_t mask) {
+  lv_obj_t *box = lv_obj_create(parent);
+  lv_obj_set_size(box, w, h);
+  lv_obj_set_pos(box, x, y);
+  chipStyle(box, radius);
+  lv_obj_t *lbl = nullptr;
+  if (txt && txt[0]) {
+    lbl = lv_label_create(box);
+    lv_obj_set_style_text_font(lbl, font, 0);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0x999999), 0);
+    lv_label_set_text(lbl, txt);
+    lv_obj_center(lbl);
+  }
+  if (gCtrlCount < kCtrlMax) gCtrl[gCtrlCount++] = {box, lbl, byteIdx, mask};
+  return box;
+}
+
+void applyPressed(const CtrlBtn &c, bool pressed) {
+  if (pressed) {
+    lv_obj_set_style_bg_opa(c.box, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(c.box, lv_palette_main(LV_PALETTE_GREEN), 0);
+    lv_obj_set_style_border_color(c.box, lv_palette_main(LV_PALETTE_GREEN), 0);
+    if (c.lbl) lv_obj_set_style_text_color(c.lbl, lv_color_black(), 0);
+  } else {
+    lv_obj_set_style_bg_opa(c.box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_color(c.box, lv_color_hex(0x555555), 0);
+    if (c.lbl) lv_obj_set_style_text_color(c.lbl, lv_color_hex(0x999999), 0);
+  }
+}
+
+lv_obj_t *makeDot(lv_obj_t *parent, int cx, int cy) {
+  lv_obj_t *dot = lv_obj_create(parent);
+  lv_obj_set_size(dot, 12, 12);
+  lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(dot, lv_color_hex(0x888888), 0);
+  lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(dot, 0, 0);
+  lv_obj_set_style_pad_all(dot, 0, 0);
+  lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_pos(dot, cx - 6, cy - 6);
+  return dot;
+}
+
+void moveDot(lv_obj_t *dot, int cx, int cy, uint16_t x, uint16_t y) {
+  if (!dot) return;
+  const int kMax = 13;  // max dot travel from centre, in pixels
+  const int dx = ((int)x - (int)procon::kStickCenter) * kMax / procon::kStickCenter;
+  const int dy = ((int)y - (int)procon::kStickCenter) * kMax / procon::kStickCenter;
+  lv_obj_set_pos(dot, cx - 6 + dx, cy - 6 - dy);  // screen Y is inverted (up = -)
+}
+
 void buildRunScreen() {
   lv_obj_t *scr = lv_screen_active();
   gRun = lv_obj_create(scr);
@@ -227,24 +317,61 @@ void buildRunScreen() {
   lv_obj_set_style_bg_color(gRun, lv_color_black(), 0);
   lv_obj_set_style_bg_opa(gRun, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(gRun, 0, 0);
-  lv_obj_set_style_pad_all(gRun, 8, 0);
+  lv_obj_set_style_pad_all(gRun, 0, 0);
   lv_obj_clear_flag(gRun, LV_OBJ_FLAG_SCROLLABLE);
 
   gRunTitle = lv_label_create(gRun);
-  lv_obj_set_style_text_font(gRunTitle, &lv_font_montserrat_28, 0);
+  lv_obj_set_style_text_font(gRunTitle, &lv_font_montserrat_14, 0);
   lv_obj_set_style_text_color(gRunTitle, lv_palette_main(LV_PALETTE_GREEN), 0);
   lv_label_set_text(gRunTitle, "RUNNING");
-  lv_obj_align(gRunTitle, LV_ALIGN_TOP_LEFT, 0, 6);
+  lv_obj_align(gRunTitle, LV_ALIGN_TOP_LEFT, 6, 1);
 
-  gRunHint = lv_label_create(gRun);
-  lv_obj_set_style_text_font(gRunHint, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_color(gRunHint, lv_color_hex(0xBBBBBB), 0);
-  lv_label_set_text(gRunHint, "Tap: pause/resume\nHold: exit to menu");
-  lv_obj_align(gRunHint, LV_ALIGN_TOP_LEFT, 0, 46);
+  // Controller diagram area (own container so child coords start at 0,0).
+  gPad = lv_obj_create(gRun);
+  lv_obj_set_size(gPad, kHRes, 112);
+  lv_obj_set_pos(gPad, 0, 16);
+  lv_obj_set_style_bg_opa(gPad, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(gPad, 0, 0);
+  lv_obj_set_style_pad_all(gPad, 0, 0);
+  lv_obj_clear_flag(gPad, LV_OBJ_FLAG_SCROLLABLE);
 
+  const lv_font_t *f12 = &lv_font_montserrat_12;
+  const lv_font_t *f14 = &lv_font_montserrat_14;
+
+  gCtrlCount = 0;
+  // Shoulder / trigger buttons (byte 2: L/ZL, byte 0: R/ZR).
+  addBtn(gPad, 2, 0, 46, 14, 3, f12, "ZL", 2, 0x80);
+  addBtn(gPad, 2, 16, 46, 14, 3, f12, "L", 2, 0x40);
+  addBtn(gPad, 192, 0, 46, 14, 3, f12, "ZR", 0, 0x80);
+  addBtn(gPad, 192, 16, 46, 14, 3, f12, "R", 0, 0x40);
+  // Left analog stick ring (click = byte 1 0x08).
+  addBtn(gPad, 12, 38, 44, 44, LV_RADIUS_CIRCLE, f12, nullptr, 1, 0x08);
+  // D-pad (byte 2).
+  addBtn(gPad, 84, 63, 15, 15, 2, f12, nullptr, 2, 0x02);   // Up
+  addBtn(gPad, 84, 93, 15, 15, 2, f12, nullptr, 2, 0x01);   // Down
+  addBtn(gPad, 66, 78, 15, 15, 2, f12, nullptr, 2, 0x08);   // Left
+  addBtn(gPad, 102, 78, 15, 15, 2, f12, nullptr, 2, 0x04);  // Right
+  // Centre / system buttons (byte 1).
+  addBtn(gPad, 104, 10, 16, 16, LV_RADIUS_CIRCLE, f12, "-", 1, 0x01);  // Minus
+  addBtn(gPad, 142, 10, 16, 16, LV_RADIUS_CIRCLE, f12, "+", 1, 0x02);  // Plus
+  addBtn(gPad, 104, 32, 16, 16, LV_RADIUS_CIRCLE, f12, "C", 1, 0x20);  // Capture
+  addBtn(gPad, 142, 32, 16, 16, LV_RADIUS_CIRCLE, f12, "H", 1, 0x10);  // Home
+  // Right analog stick ring (click = byte 1 0x04).
+  addBtn(gPad, 129, 65, 42, 42, LV_RADIUS_CIRCLE, f12, nullptr, 1, 0x04);
+  // Right cluster A/B/X/Y diamond (byte 0).
+  addBtn(gPad, 196, 30, 20, 20, LV_RADIUS_CIRCLE, f14, "X", 0, 0x02);
+  addBtn(gPad, 178, 48, 20, 20, LV_RADIUS_CIRCLE, f14, "Y", 0, 0x01);
+  addBtn(gPad, 214, 48, 20, 20, LV_RADIUS_CIRCLE, f14, "A", 0, 0x08);
+  addBtn(gPad, 196, 66, 20, 20, LV_RADIUS_CIRCLE, f14, "B", 0, 0x04);
+
+  // Stick dots last so they render on top of their rings.
+  gLDot = makeDot(gPad, kLCx, kLCy);
+  gRDot = makeDot(gPad, kRCx, kRCy);
+
+  // Hold-progress / status bar along the very bottom.
   gRunBar = lv_bar_create(gRun);
-  lv_obj_set_size(gRunBar, kHRes - 24, 12);
-  lv_obj_align(gRunBar, LV_ALIGN_BOTTOM_MID, 0, -8);
+  lv_obj_set_size(gRunBar, kHRes - 24, 6);
+  lv_obj_align(gRunBar, LV_ALIGN_BOTTOM_MID, 0, -1);
   lv_bar_set_range(gRunBar, 0, 100);
   lv_bar_set_value(gRunBar, 0, LV_ANIM_OFF);
   lv_obj_set_style_bg_color(gRunBar, lv_color_hex(0x222222), 0);
@@ -290,6 +417,9 @@ void openRun() {
   gRunPaused = false;
   renderRun();
   lv_bar_set_value(gRunBar, 0, LV_ANIM_OFF);
+  // Force the next controller push to repaint every chip from a clean slate.
+  gPrevBtn[0] = gPrevBtn[1] = gPrevBtn[2] = 0xFF;
+  gPrevLx = gPrevLy = gPrevRx = gPrevRy = 0xFFFF;
   lv_obj_add_flag(gMenu, LV_OBJ_FLAG_HIDDEN);
   lv_obj_clear_flag(gRun, LV_OBJ_FLAG_HIDDEN);
 }
@@ -401,6 +531,33 @@ void setHoldProgress(float pct) {
     lv_bar_set_value(gRunBar, v, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(gRunBar, col, LV_PART_INDICATOR);
   }
+  lvgl_port_unlock();
+}
+
+void setControllerState(const uint8_t buttons[3], uint16_t lx, uint16_t ly,
+                        uint16_t rx, uint16_t ry) {
+  if (!gPad) return;
+  if (gView != View::Running) return;  // only meaningful on the RUNNING overlay
+  // Skip the (relatively expensive) LVGL work when nothing changed.
+  if (buttons[0] == gPrevBtn[0] && buttons[1] == gPrevBtn[1] &&
+      buttons[2] == gPrevBtn[2] && lx == gPrevLx && ly == gPrevLy &&
+      rx == gPrevRx && ry == gPrevRy) {
+    return;
+  }
+  if (!lvgl_port_lock(0)) return;
+  for (int i = 0; i < gCtrlCount; i++) {
+    const bool pressed = (buttons[gCtrl[i].byteIdx] & gCtrl[i].mask) != 0;
+    applyPressed(gCtrl[i], pressed);
+  }
+  moveDot(gLDot, kLCx, kLCy, lx, ly);
+  moveDot(gRDot, kRCx, kRCy, rx, ry);
+  gPrevBtn[0] = buttons[0];
+  gPrevBtn[1] = buttons[1];
+  gPrevBtn[2] = buttons[2];
+  gPrevLx = lx;
+  gPrevLy = ly;
+  gPrevRx = rx;
+  gPrevRy = ry;
   lvgl_port_unlock();
 }
 
