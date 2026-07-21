@@ -102,6 +102,54 @@ void test_interrupt_aborts_and_resets(void) {
   TEST_ASSERT_TRUE(aDown(in));
 }
 
+// setPauseAfterInterrupt: after the reset sequence completes, the player parks
+// paused (main rearmed at step 0) until resume(), instead of re-running.
+void test_interrupt_pauses_after_reset(void) {
+  Player p(kMain);
+  p.setLoop(true);
+  p.setInterrupt(deathPred, kReset);
+  p.setPauseAfterInterrupt(true);
+  p.start();
+  procon::Input in;
+
+  gNow = 0;
+  p.update(in);
+  TEST_ASSERT_TRUE(aDown(in));
+
+  // Death: abort into the reset sequence.
+  p.feedRumble(100, 0);
+  gNow = 10;
+  p.update(in);
+  TEST_ASSERT_TRUE(p.isInterrupting());
+
+  gNow = 10;
+  p.update(in);
+  TEST_ASSERT_TRUE(bDown(in));  // reset sequence holding B
+
+  // Reset done -> parked paused, not re-running main.
+  p.feedRumble(0, 0);
+  gNow = 60;
+  p.update(in);
+  TEST_ASSERT_FALSE(p.isInterrupting());
+  TEST_ASSERT_TRUE(p.isPaused());
+  TEST_ASSERT_TRUE(p.isInterruptPaused());
+
+  // Stays neutral and frozen while parked.
+  gNow = 500;
+  p.update(in);
+  TEST_ASSERT_FALSE(aDown(in));
+  TEST_ASSERT_FALSE(bDown(in));
+  TEST_ASSERT_TRUE(p.isPaused());
+
+  // resume() continues from the top of the main sequence.
+  p.resume();
+  TEST_ASSERT_FALSE(p.isPaused());
+  TEST_ASSERT_FALSE(p.isInterruptPaused());
+  gNow = 501;
+  p.update(in);
+  TEST_ASSERT_TRUE(aDown(in));  // main restarted: A held again
+}
+
 // StickAxis sets a single axis, leaving the other at its accumulated value.
 void test_stick_axis_sets_single_axis(void) {
   static const Step kAxis[] = {
@@ -125,6 +173,7 @@ int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_normal_loop_no_interrupt);
   RUN_TEST(test_interrupt_aborts_and_resets);
+  RUN_TEST(test_interrupt_pauses_after_reset);
   RUN_TEST(test_stick_axis_sets_single_axis);
   return UNITY_END();
 }

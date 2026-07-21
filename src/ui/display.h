@@ -57,6 +57,12 @@ void setNote(const char *text);
 // UI task never churns the heap.
 void setRunStatus(const char *text);
 
+// Mirror the macro's actual pause state onto the RUNNING overlay's play/pause
+// glyph (thread-safe; a no-op unless the overlay is visible or unchanged).
+// Needed because the engine can self-pause (e.g. after a death-triggered
+// reset), not just in response to the button toggle.
+void setRunPaused(bool paused);
+
 // Push the decoded per-side host-rumble amplitude (0..255) to the RUNNING
 // overlay's rumble meters. Thread-safe; a no-op unless the RUNNING overlay is
 // visible; repaints only on change. The meters turn red once an amplitude

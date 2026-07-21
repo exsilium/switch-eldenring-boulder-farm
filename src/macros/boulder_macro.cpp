@@ -116,6 +116,10 @@ macro::Player makePlayer() {
   macro::Player p(kMainSequence);
   p.setLoop(true);  // repeat the farm cycle until the run is stopped
   p.setInterrupt(deathDetected, kResetSequence);
+  // After a death-triggered reset the run parks paused (rearmed at the first
+  // step) until the user resumes -- the GPC turns the macro off after
+  // reset_sequence rather than blindly re-running.
+  p.setPauseAfterInterrupt(true);
   return p;
 }
 
@@ -132,7 +136,11 @@ void feedRumble(uint16_t left, uint16_t right) {
   gPlayer.feedRumble(left, right);
 }
 
-bool isDeathDetected() { return gPlayer.isInterrupting(); }
+bool isDeathDetected() {
+  // Covers both the reset routine itself and the parked-paused state after it,
+  // so the UI's "Death Detected" label stays up until the user resumes.
+  return gPlayer.isInterrupting() || gPlayer.isInterruptPaused();
+}
 
 bool isRunning() { return gPlayer.isRunning(); }
 

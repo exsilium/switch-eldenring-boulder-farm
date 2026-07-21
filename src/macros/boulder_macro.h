@@ -38,8 +38,10 @@ bool update(procon::Input& in);
 // death-detection interrupt can fire. Call once per tick before update().
 void feedRumble(uint16_t left, uint16_t right);
 
-// True while the death-recovery (reset) sequence is running after a rumble
-// spike aborted the main farm loop. The runner surfaces this as a status label.
+// True while the death-recovery (reset) sequence is running -- or while the
+// run is parked paused after it -- following a rumble spike that aborted the
+// main farm loop. The runner surfaces this as a status label; it clears when
+// the user resumes.
 bool isDeathDetected();
 
 bool isRunning();

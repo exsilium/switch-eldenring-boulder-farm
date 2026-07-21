@@ -203,6 +203,13 @@ class Player {
   // Restart the sequence from the first step forever instead of completing.
   void setLoop(bool loop) { _loop = loop; }
 
+  // In loop mode, pause instead of resuming the main sequence once a fired
+  // interrupt's (reset) sequence completes: the main sequence is rearmed at its
+  // first step but held (isPaused() true, isInterruptPaused() true) until
+  // resume() -- mirroring the GPC where death flips the macro off after
+  // reset_sequence until the user restarts it. No effect when not looping.
+  void setPauseAfterInterrupt(bool pause) { _pauseAfterInterrupt = pause; }
+
   // Arm a condition-driven abort: while the main sequence runs, `pred` is polled
   // each tick; when it returns true the controller is neutralised and `steps`
   // (the interrupt / reset sequence) runs to completion before the main loop
@@ -243,6 +250,11 @@ class Player {
   // True while the interrupt (reset) sequence is running after a fired predicate.
   bool isInterrupting() const { return _inInterrupt; }
 
+  // True while parked by setPauseAfterInterrupt(true): the interrupt sequence
+  // finished and the player is paused awaiting resume(). Cleared by resume(),
+  // start(), and reset().
+  bool isInterruptPaused() const { return _interruptPaused; }
+
   // Advance the sequence and write the current state into `in`. Returns true on
   // the tick the sequence completes. No-op (returns false) when not running.
   bool update(procon::Input& in);
@@ -279,6 +291,8 @@ class Player {
   const Step* _interrupt = nullptr;
   size_t _interruptCount = 0;
   bool _inInterrupt = false;
+  bool _pauseAfterInterrupt = false;  // park after the interrupt seq completes
+  bool _interruptPaused = false;      // currently parked by that option
   uint16_t _rumbleL = 0;
   uint16_t _rumbleR = 0;
   unsigned long _seqStart = 0;  // start time of the active sequence (elapsedMs)
