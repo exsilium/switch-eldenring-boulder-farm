@@ -132,9 +132,12 @@ void Player::resume() {
 bool Player::update(procon::Input& in) {
   if (_state != State::Running) return false;
 
-  // While paused, keep streaming the frozen state without advancing timers.
+  // While paused, stream a neutral controller (nothing held down) without
+  // advancing timers or losing the accumulated state -- resume() picks the
+  // held buttons / sticks back up exactly where they left off.
   if (_paused) {
-    writeState(in);
+    procon::Input neutralIn;
+    in = neutralIn;
     return false;
   }
 

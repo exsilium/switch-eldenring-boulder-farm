@@ -182,9 +182,11 @@ using ClockFn = unsigned long (*)();
 // first step) instead of completing, so it runs forever until reset(). In loop
 // mode update() never returns true and isDone() never becomes true.
 //
-// Pausing: pause() freezes the accumulated state in place -- the held buttons /
-// sticks keep streaming but timers stop advancing -- and resume() continues
-// exactly where it left off (any in-progress Wait/Tap keeps its remaining time).
+// Pausing: pause() releases the controller to neutral for the duration (no
+// buttons or stick deflection stream while paused) but keeps the accumulated
+// state and timers frozen aside, and resume() continues exactly where it left
+// off (held inputs re-assert; any in-progress Wait/Tap keeps its remaining
+// time).
 //
 // Interrupts (condition-driven control flow): setInterrupt(pred, seq, n) arms a
 // per-tick predicate + a distinct interrupt sequence. While the main sequence
@@ -239,7 +241,8 @@ class Player {
   void reset();
 
   // Freeze / continue the sequence (no-ops unless running). While paused,
-  // update() keeps streaming the frozen state but does not advance.
+  // update() streams a neutral controller but keeps the accumulated state and
+  // timers aside for resume().
   void pause();
   void resume();
 

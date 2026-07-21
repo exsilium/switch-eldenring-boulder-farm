@@ -48,7 +48,8 @@ bool isRunning();
 bool isDone();
 
 // The macro loops forever while running, so use these to control a run:
-// pause() freezes the current inputs in place, resume() continues, and
+// pause() releases the controller to neutral while keeping the run's progress
+// frozen aside, resume() re-asserts the held inputs and continues, and
 // reset() stops it entirely and neutralises the controller.
 void pause();
 void resume();

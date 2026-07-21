@@ -150,6 +150,43 @@ void test_interrupt_pauses_after_reset(void) {
   TEST_ASSERT_TRUE(aDown(in));  // main restarted: A held again
 }
 
+// pause() streams neutral (nothing held); resume() re-asserts the held state
+// and continues with the remaining time intact.
+void test_pause_releases_inputs(void) {
+  Player p(kMain);
+  p.setLoop(true);
+  p.start();
+  procon::Input in;
+
+  gNow = 0;
+  p.update(in);
+  TEST_ASSERT_TRUE(aDown(in));  // Down(A) then Wait(100): A held
+
+  gNow = 50;
+  p.pause();
+  p.update(in);
+  TEST_ASSERT_FALSE(aDown(in));  // paused: controller released to neutral
+  TEST_ASSERT_EQUAL_UINT16(procon::kStickCenter, in.lx);
+
+  gNow = 500;
+  p.update(in);
+  TEST_ASSERT_FALSE(aDown(in));  // still neutral, timers frozen
+
+  p.resume();
+  gNow = 500;
+  p.update(in);
+  TEST_ASSERT_TRUE(aDown(in));  // held state re-asserted
+
+  // 50 ms of the Wait(100) were consumed pre-pause; A releases 50 ms after
+  // resume, not immediately.
+  gNow = 549;
+  p.update(in);
+  TEST_ASSERT_TRUE(aDown(in));
+  gNow = 550;
+  p.update(in);
+  TEST_ASSERT_FALSE(aDown(in));  // Up(A) reached
+}
+
 // StickAxis sets a single axis, leaving the other at its accumulated value.
 void test_stick_axis_sets_single_axis(void) {
   static const Step kAxis[] = {
@@ -174,6 +211,7 @@ int main(int, char **) {
   RUN_TEST(test_normal_loop_no_interrupt);
   RUN_TEST(test_interrupt_aborts_and_resets);
   RUN_TEST(test_interrupt_pauses_after_reset);
+  RUN_TEST(test_pause_releases_inputs);
   RUN_TEST(test_stick_axis_sets_single_axis);
   return UNITY_END();
 }
