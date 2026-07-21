@@ -76,6 +76,9 @@ enum class Channel : uint16_t {
 // Which analog stick a stick op targets.
 enum class Stick : uint8_t { Left, Right };
 
+// Which axis of a stick a per-axis op targets.
+enum class Axis : uint8_t { X, Y };
+
 // Extract the button-byte index / bit mask packed into a Channel.
 constexpr uint8_t channelByte(Channel c) {
   return (uint8_t)((uint16_t)c >> 8);
@@ -91,14 +94,16 @@ enum class Op : uint8_t {
   Up,        // release a channel (bit clear); no delay
   Wait,      // hold the current accumulated state for `ms`
   SetStick,  // set one analog stick to (x, y); no delay
+  SetAxis,   // set one axis of one stick to x, leaving the other axis; no delay
   Tap,       // press `channel`, hold `ms`, then release
 };
 
 struct Step {
   Op op;
   Channel channel;  // Down / Up / Tap
-  Stick stick;      // SetStick
-  uint16_t x;       // SetStick
+  Stick stick;      // SetStick / SetAxis
+  Axis axis;        // SetAxis
+  uint16_t x;       // SetStick / SetAxis (value)
   uint16_t y;       // SetStick
   uint32_t ms;      // Wait / Tap
 };
@@ -108,31 +113,57 @@ struct Step {
 // Instant press / release. Overlap-friendly: multiple Down()s before an Up()
 // hold several inputs simultaneously.
 constexpr Step Down(Channel c) {
-  return Step{Op::Down, c, Stick::Left, 0, 0, 0};
+  return Step{Op::Down, c, Stick::Left, Axis::X, 0, 0, 0};
 }
 constexpr Step Up(Channel c) {
-  return Step{Op::Up, c, Stick::Left, 0, 0, 0};
+  return Step{Op::Up, c, Stick::Left, Axis::X, 0, 0, 0};
 }
 
 // Hold the current accumulated state for `ms` milliseconds.
 constexpr Step Wait(uint32_t ms) {
-  return Step{Op::Wait, Channel::Y, Stick::Left, 0, 0, ms};
+  return Step{Op::Wait, Channel::Y, Stick::Left, Axis::X, 0, 0, ms};
 }
 
 // Convenience: press `c`, hold `ms`, release. Equivalent to
 // Down(c), Wait(ms), Up(c).
 constexpr Step Tap(Channel c, uint32_t ms) {
-  return Step{Op::Tap, c, Stick::Left, 0, 0, ms};
+  return Step{Op::Tap, c, Stick::Left, Axis::X, 0, 0, ms};
 }
 
 // Instant analog set. 12-bit range; centre is procon::kStickCenter (0x800).
 constexpr Step StickMove(Stick s, uint16_t x, uint16_t y) {
-  return Step{Op::SetStick, Channel::Y, s, x, y, 0};
+  return Step{Op::SetStick, Channel::Y, s, Axis::X, x, y, 0};
 }
 constexpr Step StickCenter(Stick s) {
-  return Step{Op::SetStick, Channel::Y, s, procon::kStickCenter,
+  return Step{Op::SetStick, Channel::Y, s, Axis::X, procon::kStickCenter,
               procon::kStickCenter, 0};
 }
+
+// Instant single-axis analog set: set one axis of `s` to `value`, leaving the
+// other axis at its current accumulated value. Mirrors GPCs that drive PS5_LX /
+// PS5_LY independently (hold one axis while sweeping the other).
+constexpr Step StickAxis(Stick s, Axis a, uint16_t value) {
+  return Step{Op::SetAxis, Channel::Y, s, a, value, 0, 0};
+}
+
+// Per-tick runtime context handed to an interrupt predicate. Lets a macro react
+// to controller feedback (e.g. rumble amplitude) and elapsed time each tick,
+// without the engine reaching into the USB/protocol layer -- the run loop feeds
+// the values in via feedRumble() at the update() call site.
+struct TickContext {
+  uint16_t rumbleLeft;   // decoded host rumble, left side (RUMBLE_A), 0..255
+  uint16_t rumbleRight;  // decoded host rumble, right side (RUMBLE_B), 0..255
+  uint32_t elapsedMs;    // milliseconds since the current sequence started
+};
+
+// Interrupt predicate: return true to abort the main sequence and run the
+// interrupt (reset) sequence. Evaluated once per tick while the main sequence
+// runs (never during the interrupt sequence itself).
+using InterruptFn = bool (*)(const TickContext&);
+
+// Injectable millisecond clock (test hook). Defaults to an esp_timer-backed
+// clock on device; host tests install a virtual clock via Player::setClock().
+using ClockFn = unsigned long (*)();
 
 // Runs a `const Step[]` sequence, accumulating controller state and driving a
 // procon::Input each tick.
@@ -154,14 +185,45 @@ constexpr Step StickCenter(Stick s) {
 // Pausing: pause() freezes the accumulated state in place -- the held buttons /
 // sticks keep streaming but timers stop advancing -- and resume() continues
 // exactly where it left off (any in-progress Wait/Tap keeps its remaining time).
+//
+// Interrupts (condition-driven control flow): setInterrupt(pred, seq, n) arms a
+// per-tick predicate + a distinct interrupt sequence. While the main sequence
+// runs, `pred(ctx)` is evaluated each tick; when it fires the controller is
+// neutralised and the interrupt (reset) sequence runs to completion. Afterwards
+// the player resumes looping the main sequence (loop mode) or stops (one-shot).
+// This maps 1:1 onto the reference GPC's "presumeDead -> reset_sequence" abort.
+// Feed the predicate's rumble amplitude with feedRumble() before each update().
 class Player {
  public:
-  Player(const Step* steps, size_t count) : _steps(steps), _count(count) {}
+  Player(const Step* steps, size_t count)
+      : _main(steps), _mainCount(count), _steps(steps), _count(count) {}
   template <size_t N>
   explicit Player(const Step (&steps)[N]) : Player(steps, N) {}
 
   // Restart the sequence from the first step forever instead of completing.
   void setLoop(bool loop) { _loop = loop; }
+
+  // Arm a condition-driven abort: while the main sequence runs, `pred` is polled
+  // each tick; when it returns true the controller is neutralised and `steps`
+  // (the interrupt / reset sequence) runs to completion before the main loop
+  // resumes. Pass pred == nullptr to disarm.
+  void setInterrupt(InterruptFn pred, const Step* steps, size_t count) {
+    _interruptFn = pred;
+    _interrupt = steps;
+    _interruptCount = count;
+  }
+  template <size_t N>
+  void setInterrupt(InterruptFn pred, const Step (&steps)[N]) {
+    setInterrupt(pred, steps, N);
+  }
+
+  // Supply the current host-rumble amplitudes for the interrupt predicate. Call
+  // once per tick (from the run loop) before update(); safe to omit if no
+  // interrupt is armed.
+  void feedRumble(uint16_t left, uint16_t right) {
+    _rumbleL = left;
+    _rumbleR = right;
+  }
 
   // Begin from the first step with a neutral controller state.
   void start();
@@ -178,9 +240,15 @@ class Player {
   bool isDone() const { return _state == State::Done; }
   bool isPaused() const { return _paused; }
 
+  // True while the interrupt (reset) sequence is running after a fired predicate.
+  bool isInterrupting() const { return _inInterrupt; }
+
   // Advance the sequence and write the current state into `in`. Returns true on
   // the tick the sequence completes. No-op (returns false) when not running.
   bool update(procon::Input& in);
+
+  // Install a custom millisecond clock (host tests). nullptr restores default.
+  static void setClock(ClockFn fn);
 
  private:
   enum class State : uint8_t { Idle, Running, Done };
@@ -193,12 +261,27 @@ class Player {
   void applyDown(Channel c) { _buttons[channelByte(c)] |= channelMask(c); }
   void applyUp(Channel c) { _buttons[channelByte(c)] &= ~channelMask(c); }
   void applyStick(Stick s, uint16_t x, uint16_t y);
+  void applyAxis(Stick s, Axis a, uint16_t v);
+  // Switch the active sequence to the interrupt table (or back to main).
+  void enterInterrupt(unsigned long now);
+  void restartMain();
 
-  const Step* _steps;
+  const Step* _main;    // the primary (main) sequence
+  size_t _mainCount;
+  const Step* _steps;   // the currently active sequence (main or interrupt)
   size_t _count;
   size_t _index = 0;
   State _state = State::Idle;
   bool _loop = false;
+
+  // Interrupt / condition-driven control flow.
+  InterruptFn _interruptFn = nullptr;
+  const Step* _interrupt = nullptr;
+  size_t _interruptCount = 0;
+  bool _inInterrupt = false;
+  uint16_t _rumbleL = 0;
+  uint16_t _rumbleR = 0;
+  unsigned long _seqStart = 0;  // start time of the active sequence (elapsedMs)
 
   // Accumulated controller state.
   uint8_t _buttons[3] = {0x00, 0x00, 0x00};

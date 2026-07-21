@@ -39,4 +39,36 @@ inline void packStick(uint16_t x, uint16_t y, uint8_t* out) {
   out[2] = (uint8_t)(y >> 4);
 }
 
+// ---- Host rumble (HD-rumble) amplitude decode ----------------------------
+//
+// The Switch drives haptics with an 8-byte rumble payload: 4 bytes for the
+// left actuator (RUMBLE_A) followed by 4 bytes for the right (RUMBLE_B). Each
+// side encodes a high-frequency and a low-frequency band (frequency + linear
+// amplitude), but full HD-rumble reconstruction is unnecessary here -- a
+// macro's "death detection" only needs a robust amplitude/threshold.
+//
+// The idle / "no rumble" payload for a side is {0x00, 0x01, 0x40, 0x40}
+// (the values a controller streams when the game requests silence). We decode a
+// coarse 0..255 amplitude as the deviation from that neutral pattern:
+//   * high-band amplitude lives in byte 1 (bits 7..1); bit 0 / byte 0 are
+//     frequency, so masking 0xFE yields 0 at idle and grows with intensity.
+//   * low-band amplitude shows up as byte 3's deviation from the 0x40 neutral.
+// The side amplitude is the stronger of the two bands, clamped to 0..255. This
+// is intentionally a lightweight proxy (see issue #6: full HD-rumble fidelity
+// is out of scope); it is monotonic with intensity and reads exactly 0 at idle.
+constexpr uint8_t kRumbleNeutralLow = 0x40;
+
+inline uint8_t decodeRumbleAmplitude(const uint8_t side[4]) {
+  const uint8_t hi = (uint8_t)(side[1] & 0xFE);  // high-band amplitude, 0 at idle
+  int loDev = (int)side[3] - (int)kRumbleNeutralLow;
+  if (loDev < 0) loDev = -loDev;
+  loDev *= 2;  // scale the low-band deviation into the 0..255 range
+  if (loDev > 0xFF) loDev = 0xFF;
+  return hi > (uint8_t)loDev ? hi : (uint8_t)loDev;
+}
+
+// Default death-detection threshold (matches the reference GPC's RUMBLE_MIN
+// intent): an amplitude at/above this counts as a strong rumble.
+constexpr uint16_t kRumbleMin = 64;
+
 }  // namespace procon

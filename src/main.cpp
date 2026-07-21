@@ -235,8 +235,14 @@ static void stream_task(void *arg) {
   while (1) {
     if (tud_mounted() && gProtocol.streamingEnabled() && tud_hid_ready()) {
       // Controller accepted: drive the input macro only while a run is active
-      // (started from the menu), then stream the current input state.
-      if (gMacroRunning) boulder_macro::update(gProtocol.input);
+      // (started from the menu), then stream the current input state. Feed the
+      // decoded host rumble in first so the macro's death-detection interrupt
+      // can fire from the update() call site (the engine never reaches into the
+      // protocol layer itself).
+      if (gMacroRunning) {
+        boulder_macro::feedRumble(gProtocol.rumbleLeft(), gProtocol.rumbleRight());
+        boulder_macro::update(gProtocol.input);
+      }
 
       size_t outLen = 0;
       const uint8_t *rep = gProtocol.buildStreamReport(outLen);
@@ -363,6 +369,7 @@ static void app_loop_task(void *arg) {
       case ui::Command::RunMacro:
         boulder_macro::start();  // begins a fresh, looping run
         gMacroRunning = true;
+        ui::setRunStatus("");  // clear any lingering death-detected label
         break;
       case ui::Command::TogglePause:
         if (boulder_macro::isPaused()) {
@@ -394,6 +401,18 @@ static void app_loop_task(void *arg) {
     {
       const procon::Input in = gProtocol.input;
       ui::setControllerState(in.buttons, in.lx, in.ly, in.rx, in.ry);
+    }
+
+    // Visualise the decoded host rumble on the overlay's per-side meters, and
+    // surface the macro's death-detection state as a status label.
+    ui::setRumble(gProtocol.rumbleLeft(), gProtocol.rumbleRight());
+    {
+      static bool wasDead = false;
+      const bool dead = gMacroRunning && boulder_macro::isDeathDetected();
+      if (dead != wasDead) {
+        ui::setRunStatus(dead ? "Death Detected" : "");
+        wasDead = dead;
+      }
     }
 
     // Status + NeoPixel refresh at ~5 Hz.

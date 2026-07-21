@@ -59,6 +59,14 @@ class Protocol {
   // signal for the UI / state machine).
   bool handshakeStarted() const { return _deviceInfoQueried; }
 
+  // Latest decoded host-rumble amplitude per side (0..255), left ~= RUMBLE_A,
+  // right ~= RUMBLE_B. Extracted from the 0x01/0x10 output reports' HD-rumble
+  // payload (see procon::decodeRumbleAmplitude) with a short decay/hold so brief
+  // packets remain observable at the ~120 Hz poll rate. A macro reads these to
+  // implement feedback-driven behaviour (e.g. death detection / auto-stop).
+  uint16_t rumbleLeft() const { return _rumbleL; }
+  uint16_t rumbleRight() const { return _rumbleR; }
+
   // Sticky total of OUT reports received across ALL connection sessions (NOT
   // cleared by reset()). >0 proves the host enumerated us and began the
   // handshake at least once -- distinguishes "never enumerated" from "handshake
@@ -77,6 +85,8 @@ class Protocol {
     bool gotStickCal;        // 0x603D factory stick calibration read
     bool gotSetMode;         // 0x03 set-input-report-mode answered
     bool gotVibration;       // 0x48 enable-vibration answered
+    uint16_t rumbleL;        // last decoded left (RUMBLE_A) amplitude, 0..255
+    uint16_t rumbleR;        // last decoded right (RUMBLE_B) amplitude, 0..255
   };
   const Diag& diag() const { return _diag; }
 
@@ -94,19 +104,25 @@ class Protocol {
   bool _vibrationEnabled;
   uint8_t _vibrationReport;
   uint8_t _vibrationIdx;
-  bool _imuEnabled;
-  bool _deviceInfoQueried;
+  bool _imuEnabled;  bool _deviceInfoQueried;
   bool _helloPending;  // announce 0x81 0x01 until the host sends its first OUT
   bool _hidReady;      // stream 0x30 only after the handshake has advanced
   bool _standardMode;  // host issued set_mode 0x30 -> begin streaming input
   uint32_t _timer;
   uint32_t _timestampMs;
   uint32_t _everOut;  // sticky OUT-report total (survives reset())
+  uint16_t _rumbleL;  // decoded left (RUMBLE_A) amplitude, 0..255 (decayed)
+  uint16_t _rumbleR;  // decoded right (RUMBLE_B) amplitude, 0..255 (decayed)
+  uint32_t _rumbleMs; // millis() of the last rumble decay tick
   Diag _diag;
 
   void clearReport();
   void clearRequest();
   void setTimer();
+  // Decode the 8-byte HD-rumble payload at `rumble` (4 bytes left, 4 right) and
+  // fold it into the decayed _rumbleL/_rumbleR amplitudes.
+  void decodeRumble(const uint8_t* rumble);
+  void decayRumble();
   void writeSticks();              // fill _switchReport sticks/buttons from input
   void setStandardInputReport();   // timer + buttons + sticks + vibration
   void setFullInputReport();       // 0x30 + IMU
