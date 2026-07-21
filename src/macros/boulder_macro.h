@@ -17,9 +17,11 @@
 // full channel list (buttons, D-pad, both analog sticks) and factory helpers
 // (Down / Up / Wait / Tap / StickMove / StickCenter).
 //
-// Current (placeholder) sequence: D-pad LEFT tap -> 1 s wait -> D-pad RIGHT
-// tap, looped continuously. Replace kSequence in boulder_macro.cpp with the
-// real farm routine.
+// The sequence is the Lenne's Rise farm routine ported from the reference
+// Cronus Zen GPC v1.1.0 (summon Torrent, ride to the boulder spawn with a
+// mid-run correction, dodge, evade volley, pickup, then reload the Site of
+// Grace), with a rumble-triggered death interrupt that reruns the reset
+// routine -- see boulder_macro.cpp.
 namespace boulder_macro {
 
 // Begin the macro from the start.

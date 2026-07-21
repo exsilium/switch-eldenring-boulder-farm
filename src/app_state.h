@@ -12,7 +12,7 @@ enum class AppState {
   IDLE_DETACHED,   // powered, USB detached, waiting for long-press
   ATTACHING,       // TinyUSBDevice.attach() called, waiting for host mount
   HANDSHAKING,     // mounted, answering 0x80 + subcommands
-  RUN_MACRO,       // LEFT -> 1s -> RIGHT (runs once per connection)
+  RUN_MACRO,       // boulder-farm macro run active (started from the menu)
   CONNECTED_IDLE,  // macro done, holding neutral 0x30 on the poll path
   DETACHING        // TinyUSBDevice.detach() called, returning to idle
 };
