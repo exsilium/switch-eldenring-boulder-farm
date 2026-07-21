@@ -380,7 +380,10 @@ static void app_loop_task(void *arg) {
         break;
       case ui::Command::StopMacro:
         gMacroRunning = false;
-        boulder_macro::reset();  // neutralise the controller
+        boulder_macro::reset();    // neutralise the macro engine
+        gProtocol.input.reset();   // ...and the streamed controller state, which
+                                   // otherwise keeps the last held inputs forever
+                                   // (update() no-ops once the player is idle)
         break;
       case ui::Command::Reattach:
         if (s_usbStarted) {
