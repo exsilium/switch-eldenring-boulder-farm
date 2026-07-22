@@ -11,7 +11,7 @@ using namespace macro;
 // Timings ported 1:1 from the reference Cronus Zen GPC v1.1.0 (Elden Ring -
 // Boulder Chase Farm at Lenne's Rise). See the gist linked in issue #8.
 constexpr uint32_t TORRENT_TIME = 2040;    // wait for Torrent before turning
-constexpr uint32_t TURN_TIME = 1475;       // turn with Torrent to the path
+constexpr uint32_t TURN_TIME = 1490;       // turn with Torrent to the path
 constexpr uint32_t RUN_HALF_TIME = 5240;   // reach half-way for course correction
 constexpr uint32_t RUN_END_TIME = 5040;    // reach the ball spawn point
 constexpr uint32_t DODGE_TIME = 300;       // delay before dodging the ball
@@ -66,7 +66,7 @@ constexpr Step kMainSequence[] = {
     StickAxis(Stick::Left, Axis::Y, kFwd), Wait(RUN_HALF_TIME),
 
     // Half-way point: make a small correction to the left.
-    StickAxis(Stick::Left, Axis::X, kLeft40), Wait(200),
+    StickAxis(Stick::Left, Axis::X, kLeft40), Wait(100),
 
     // Run until the spawning point.
     StickAxis(Stick::Left, Axis::X, kCenter), Wait(RUN_END_TIME),

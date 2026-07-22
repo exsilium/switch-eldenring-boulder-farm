@@ -69,6 +69,6 @@ inline uint8_t decodeRumbleAmplitude(const uint8_t side[4]) {
 
 // Default death-detection threshold (matches the reference GPC's RUMBLE_MIN
 // intent): an amplitude at/above this counts as a strong rumble.
-constexpr uint16_t kRumbleMin = 64;
+constexpr uint16_t kRumbleMin = 10;
 
 }  // namespace procon
