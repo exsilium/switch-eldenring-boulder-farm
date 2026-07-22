@@ -661,6 +661,16 @@ void setRunStatus(const char *text) {
   lvgl_port_unlock();
 }
 
+void setRunPaused(bool paused) {
+  if (!gRun) return;
+  if (gView != View::Running) return;  // no-op unless the RUNNING overlay is up
+  if (paused == gRunPaused) return;    // repaint only on change
+  if (!lvgl_port_lock(0)) return;
+  gRunPaused = paused;
+  renderRun();
+  lvgl_port_unlock();
+}
+
 void setRumble(uint16_t left, uint16_t right) {
   if (!gRumL || !gRumR) return;
   if (gView != View::Running) return;  // no-op unless the RUNNING overlay is up

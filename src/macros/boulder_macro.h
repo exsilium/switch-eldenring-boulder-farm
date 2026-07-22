@@ -17,9 +17,11 @@
 // full channel list (buttons, D-pad, both analog sticks) and factory helpers
 // (Down / Up / Wait / Tap / StickMove / StickCenter).
 //
-// Current (placeholder) sequence: D-pad LEFT tap -> 1 s wait -> D-pad RIGHT
-// tap, looped continuously. Replace kSequence in boulder_macro.cpp with the
-// real farm routine.
+// The sequence is the Lenne's Rise farm routine ported from the reference
+// Cronus Zen GPC v1.1.0 (summon Torrent, ride to the boulder spawn with a
+// mid-run correction, dodge, evade volley, pickup, then reload the Site of
+// Grace), with a rumble-triggered death interrupt that reruns the reset
+// routine -- see boulder_macro.cpp.
 namespace boulder_macro {
 
 // Begin the macro from the start.
@@ -36,15 +38,18 @@ bool update(procon::Input& in);
 // death-detection interrupt can fire. Call once per tick before update().
 void feedRumble(uint16_t left, uint16_t right);
 
-// True while the death-recovery (reset) sequence is running after a rumble
-// spike aborted the main farm loop. The runner surfaces this as a status label.
+// True while the death-recovery (reset) sequence is running -- or while the
+// run is parked paused after it -- following a rumble spike that aborted the
+// main farm loop. The runner surfaces this as a status label; it clears when
+// the user resumes.
 bool isDeathDetected();
 
 bool isRunning();
 bool isDone();
 
 // The macro loops forever while running, so use these to control a run:
-// pause() freezes the current inputs in place, resume() continues, and
+// pause() releases the controller to neutral while keeping the run's progress
+// frozen aside, resume() re-asserts the held inputs and continues, and
 // reset() stops it entirely and neutralises the controller.
 void pause();
 void resume();

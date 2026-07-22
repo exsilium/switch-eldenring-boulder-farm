@@ -380,7 +380,10 @@ static void app_loop_task(void *arg) {
         break;
       case ui::Command::StopMacro:
         gMacroRunning = false;
-        boulder_macro::reset();  // neutralise the controller
+        boulder_macro::reset();    // neutralise the macro engine
+        gProtocol.input.reset();   // ...and the streamed controller state, which
+                                   // otherwise keeps the last held inputs forever
+                                   // (update() no-ops once the player is idle)
         break;
       case ui::Command::Reattach:
         if (s_usbStarted) {
@@ -404,8 +407,11 @@ static void app_loop_task(void *arg) {
     }
 
     // Visualise the decoded host rumble on the overlay's per-side meters, and
-    // surface the macro's death-detection state as a status label.
+    // surface the macro's death-detection state as a status label. Mirror the
+    // macro's actual pause state too: the engine self-pauses after a
+    // death-triggered reset, not only on the button toggle.
     ui::setRumble(gProtocol.rumbleLeft(), gProtocol.rumbleRight());
+    if (gMacroRunning) ui::setRunPaused(boulder_macro::isPaused());
     {
       static bool wasDead = false;
       const bool dead = gMacroRunning && boulder_macro::isDeathDetected();

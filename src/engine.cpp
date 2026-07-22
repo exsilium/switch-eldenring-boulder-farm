@@ -94,6 +94,7 @@ void Player::start() {
   _hasRelease = false;
   _paused = false;
   _inInterrupt = false;
+  _interruptPaused = false;
   _seqStart = millis();
   _state = State::Running;
 }
@@ -107,6 +108,7 @@ void Player::reset() {
   _hasRelease = false;
   _paused = false;
   _inInterrupt = false;
+  _interruptPaused = false;
   _state = State::Idle;
 }
 
@@ -119,6 +121,7 @@ void Player::pause() {
 void Player::resume() {
   if (!_paused) return;
   _paused = false;
+  _interruptPaused = false;
   // Push the in-progress timer + sequence clock forward by the paused span so
   // no time is lost (the interrupt predicate's elapsedMs stays continuous too).
   const unsigned long paused = millis() - _pauseStart;
@@ -129,9 +132,12 @@ void Player::resume() {
 bool Player::update(procon::Input& in) {
   if (_state != State::Running) return false;
 
-  // While paused, keep streaming the frozen state without advancing timers.
+  // While paused, stream a neutral controller (nothing held down) without
+  // advancing timers or losing the accumulated state -- resume() picks the
+  // held buttons / sticks back up exactly where they left off.
   if (_paused) {
-    writeState(in);
+    procon::Input neutralIn;
+    in = neutralIn;
     return false;
   }
 
@@ -200,12 +206,20 @@ bool Player::update(procon::Input& in) {
   }
 
   // End of the active sequence. If this was the interrupt (reset) sequence, hand
-  // control back to the main sequence: loop mode restarts it, otherwise stop.
+  // control back to the main sequence: loop mode restarts it (parked paused when
+  // setPauseAfterInterrupt is armed), otherwise stop.
   if (_inInterrupt) {
     neutral();
     writeState(in);
     if (_loop) {
       restartMain();
+      if (_pauseAfterInterrupt) {
+        // Rearmed at the first step but held until resume() -- the GPC's
+        // "death turns the macro off after reset_sequence" behaviour.
+        _paused = true;
+        _interruptPaused = true;
+        _pauseStart = now;
+      }
       return false;
     }
     _inInterrupt = false;
