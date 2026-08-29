@@ -40,10 +40,42 @@
 
 #include "procon/procon_protocol.h"
 #include "macros/boulder_macro.h"
+#include "macros/boulder_macro_ns2.h"
 #include "ui/display.h"
 #include "ui/button.h"
 
 static const char *TAG = "procon";
+
+// ---- Macro selection -----------------------------------------------------
+// The menu offers the same boulder farm routine in two button layouts (Switch 2
+// defaults and the older PC defaults). Both macros expose an identical
+// interface, so the runner binds to the selected one through this table.
+struct MacroApi {
+  void (*start)();
+  void (*reset)();
+  bool (*update)(procon::Input &);
+  void (*feedRumble)(uint16_t, uint16_t);
+  bool (*isDeathDetected)();
+  void (*pause)();
+  void (*resume)();
+  bool (*isPaused)();
+};
+
+static constexpr MacroApi kMacroNs2 = {
+    boulder_macro_ns2::start,           boulder_macro_ns2::reset,
+    boulder_macro_ns2::update,          boulder_macro_ns2::feedRumble,
+    boulder_macro_ns2::isDeathDetected, boulder_macro_ns2::pause,
+    boulder_macro_ns2::resume,          boulder_macro_ns2::isPaused,
+};
+
+static constexpr MacroApi kMacroPc = {
+    boulder_macro::start,           boulder_macro::reset,
+    boulder_macro::update,          boulder_macro::feedRumble,
+    boulder_macro::isDeathDetected, boulder_macro::pause,
+    boulder_macro::resume,          boulder_macro::isPaused,
+};
+
+static const MacroApi *volatile gMacro = &kMacroNs2;
 
 // ---- Board pins (Adafruit Feather ESP32-S3 TFT) --------------------------
 #define PIN_NEOPIXEL 33
@@ -152,7 +184,7 @@ static void device_event_handler(tinyusb_event_t *event, void *arg) {
     case TINYUSB_EVENT_ATTACHED:
       ESP_LOGI(TAG, "USB mounted");
       gProtocol.reset();
-      boulder_macro::reset();
+      gMacro->reset();
       gMacroRunning = false;
       if (gProtocol.helloPending()) {
         size_t outLen = 0;
@@ -240,8 +272,8 @@ static void stream_task(void *arg) {
       // can fire from the update() call site (the engine never reaches into the
       // protocol layer itself).
       if (gMacroRunning) {
-        boulder_macro::feedRumble(gProtocol.rumbleLeft(), gProtocol.rumbleRight());
-        boulder_macro::update(gProtocol.input);
+        gMacro->feedRumble(gProtocol.rumbleLeft(), gProtocol.rumbleRight());
+        gMacro->update(gProtocol.input);
       }
 
       size_t outLen = 0;
@@ -365,22 +397,32 @@ static void app_loop_task(void *arg) {
     // Single-button navigation + menu commands.
     const button::Event ev = button::poll();
     if (ev != button::Event::None) ui::onButton(ev);
-    switch (ui::takeCommand()) {
-      case ui::Command::RunMacro:
-        boulder_macro::start();  // begins a fresh, looping run
+    const ui::Command cmd = ui::takeCommand();
+    switch (cmd) {
+      case ui::Command::PressA:
+        gProtocol.input.buttons[0] |= 0x08;  // A
+        vTaskDelay(pdMS_TO_TICKS(100));
+        gProtocol.input.buttons[0] &= (uint8_t)~0x08;
+        break;
+      case ui::Command::RunMacroNs2:
+      case ui::Command::RunMacroPc:
+        gMacroRunning = false;
+        gMacro->reset();  // neutralise the previously selected variant
+        gMacro = (cmd == ui::Command::RunMacroNs2) ? &kMacroNs2 : &kMacroPc;
+        gMacro->start();  // begins a fresh, looping run
         gMacroRunning = true;
         ui::setRunStatus("");  // clear any lingering death-detected label
         break;
       case ui::Command::TogglePause:
-        if (boulder_macro::isPaused()) {
-          boulder_macro::resume();
+        if (gMacro->isPaused()) {
+          gMacro->resume();
         } else {
-          boulder_macro::pause();
+          gMacro->pause();
         }
         break;
       case ui::Command::StopMacro:
         gMacroRunning = false;
-        boulder_macro::reset();    // neutralise the macro engine
+        gMacro->reset();           // neutralise the macro engine
         gProtocol.input.reset();   // ...and the streamed controller state, which
                                    // otherwise keeps the last held inputs forever
                                    // (update() no-ops once the player is idle)
@@ -411,10 +453,10 @@ static void app_loop_task(void *arg) {
     // macro's actual pause state too: the engine self-pauses after a
     // death-triggered reset, not only on the button toggle.
     ui::setRumble(gProtocol.rumbleLeft(), gProtocol.rumbleRight());
-    if (gMacroRunning) ui::setRunPaused(boulder_macro::isPaused());
+    if (gMacroRunning) ui::setRunPaused(gMacro->isPaused());
     {
       static bool wasDead = false;
-      const bool dead = gMacroRunning && boulder_macro::isDeathDetected();
+      const bool dead = gMacroRunning && gMacro->isDeathDetected();
       if (dead != wasDead) {
         ui::setRunStatus(dead ? "Death Detected" : "");
         wasDead = dead;

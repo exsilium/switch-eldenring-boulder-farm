@@ -19,7 +19,9 @@ enum class Phase {
 // Commands the menu raises for the application layer to act on.
 enum class Command {
   None,
-  RunMacro,     // start a (looping) macro run
+  PressA,       // single short A press (the Switch 2 pairing prompt needs it)
+  RunMacroNs2,  // start a (looping) run of the Switch 2 button-layout macro
+  RunMacroPc,   // start a (looping) run of the PC button-layout macro
   Reattach,     // cycle the USB connection
   TogglePause,  // pause / resume the active run
   StopMacro,    // stop the active run and neutralise the controller

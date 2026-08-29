@@ -51,7 +51,7 @@ lv_obj_t *gFlag[4] = {nullptr, nullptr, nullptr, nullptr};
 lv_obj_t *gBar = nullptr;
 
 lv_obj_t *gMenu = nullptr;     // full-screen menu overlay (hidden by default)
-lv_obj_t *gMenuRow[3] = {nullptr, nullptr, nullptr};
+lv_obj_t *gMenuRow[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
 
 lv_obj_t *gRun = nullptr;       // full-screen "running" overlay (hidden by default)
 lv_obj_t *gRunTitle = nullptr;  // play / pause glyph (cassette-style)
@@ -93,8 +93,10 @@ constexpr int kRCx = 150, kRCy = 86;
 uint8_t gPrevBtn[3] = {0xFF, 0xFF, 0xFF};
 uint16_t gPrevLx = 0xFFFF, gPrevLy = 0xFFFF, gPrevRx = 0xFFFF, gPrevRy = 0xFFFF;
 
-constexpr int kMenuCount = 3;
-const char *kMenuLabels[kMenuCount] = {"Run Boulder", "Reattach USB", "Back"};
+constexpr int kMenuCount = 5;
+const char *kMenuLabels[kMenuCount] = {"Press A", "Run Boulder (NS2)",
+                                      "Run Boulder (PC)", "Reattach USB",
+                                      "Back"};
 const char *kFlagLabels[4] = {"DEV", "CAL", "MODE", "VIB"};
 
 enum class View { Status, Menu, Running };
@@ -242,16 +244,16 @@ void buildMenu() {
   lv_obj_clear_flag(gMenu, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t *title = lv_label_create(gMenu);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
   lv_obj_set_style_text_color(title, lv_color_white(), 0);
   lv_label_set_text(title, "MENU");
   lv_obj_align(title, LV_ALIGN_TOP_LEFT, 0, 0);
 
   for (int i = 0; i < kMenuCount; i++) {
     gMenuRow[i] = lv_label_create(gMenu);
-    lv_obj_set_style_text_font(gMenuRow[i], &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_font(gMenuRow[i], &lv_font_montserrat_14, 0);
     lv_label_set_text(gMenuRow[i], kMenuLabels[i]);
-    lv_obj_align(gMenuRow[i], LV_ALIGN_TOP_LEFT, 12, 28 + i * 26);
+    lv_obj_align(gMenuRow[i], LV_ALIGN_TOP_LEFT, 6, 18 + i * 20);
   }
 
   lv_obj_add_flag(gMenu, LV_OBJ_FLAG_HIDDEN);  // hidden until opened
@@ -500,9 +502,11 @@ void openRun() {
 
 void activateMenu() {
   switch (gSel) {
-    case 0: gPending = Command::RunMacro; openRun(); break;
-    case 1: gPending = Command::Reattach; closeMenu(); break;
-    case 2: closeMenu(); break;
+    case 0: gPending = Command::PressA; break;  // stays in the menu
+    case 1: gPending = Command::RunMacroNs2; openRun(); break;
+    case 2: gPending = Command::RunMacroPc; openRun(); break;
+    case 3: gPending = Command::Reattach; closeMenu(); break;
+    case 4: closeMenu(); break;
     default: break;
   }
 }

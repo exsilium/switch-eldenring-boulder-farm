@@ -37,7 +37,8 @@ outputs land back on the host under `.pio/build/feather_s3_idf/`
 (`firmware.elf`, `firmware.bin`).
 
 Extra arguments are forwarded to `pio run`, e.g. `./build.sh -t upload`
-(local flashing needs USB device passthrough into the container).
+(local flashing needs USB device passthrough into the container — see
+[Flashing](#flashing)).
 
 > The first (cold) build is slow because PlatformIO downloads the `espressif32`
 > platform, the ESP-IDF toolchain and the managed components. The platform and
@@ -59,6 +60,54 @@ Upload (put the board in bootloader — hold **BOOT**, tap **RESET**):
 pio run -e feather_s3_idf -t upload
 ```
 
+## Flashing
+
+Docker Desktop (Windows/macOS) cannot pass a USB serial device into a Linux
+container, so `-t upload` inside the build container never sees the board. The
+portable flow is **build in Docker, flash from the host with `esptool`**:
+
+```sh
+uv tool install esptool     # one-time host prerequisite
+# or: pipx install esptool / pip install esptool
+```
+
+With [uv](https://docs.astral.sh/uv/) you can also skip the install entirely —
+the launchers fall back to `uv tool run esptool` (an ephemeral, uv-managed
+environment) when no `esptool` is on `PATH`.
+
+Put the board in bootloader mode (hold **BOOT**, tap **RESET**, release
+**BOOT**), then:
+
+**Linux / macOS:**
+
+```sh
+./flash.sh                      # auto-detects the serial port
+PORT=/dev/ttyACM0 ./flash.sh    # explicit port
+```
+
+**Windows (PowerShell / cmd):**
+
+```powershell
+.\flash.ps1                     # auto-detects the COM port
+.\flash.ps1 -Port COM7          # explicit port
+```
+
+The launchers write the Docker-built artifacts from
+`.pio/build/feather_s3_idf/` at the ESP-IDF offsets (`0x0` bootloader,
+`0x8000` partition table, `0x10000` app) and accept `-Baud` / `BAUD=` if
+921600 proves flaky. Tap **RESET** afterwards to run the new firmware.
+
+> The single USB-C port is the USB-OTG port and the firmware claims it for HID,
+> so the board only exposes a serial port while it is in ROM download mode.
+
+On **Linux** you can flash straight from the build container instead, since
+`--device` passthrough works there:
+
+```sh
+docker run --rm -v "$PWD:/project" --device /dev/ttyACM0 \
+    switch-firmware-builder -t upload
+```
+
 ## Writing a macro
 
 Input macros are **declarative, GPC-style command streams**. A macro is a flat,
@@ -66,6 +115,10 @@ readable `macro::Step` table where every step carries its own timing, so you
 never touch a phase state machine or poke button bits by hand. The reusable
 runtime lives in [`src/engine.h`](src/engine.h) / [`src/engine.cpp`](src/engine.cpp);
 the files under [`src/macros/`](src/macros) contain **only** macro definitions.
+
+Two are shipped: [`boulder_macro.cpp`](src/macros/boulder_macro.cpp) (PC default
+bindings) and [`boulder_macro_ns2.cpp`](src/macros/boulder_macro_ns2.cpp) (the
+Switch 2 release's bindings — same routine and timings, different buttons).
 
 ### The engine at a glance
 
@@ -140,18 +193,18 @@ runner can feed rumble each tick (before `update()`) and surface the state.
 
 `ui::setRunStatus(const char *text)` writes a short label onto the RUNNING
 overlay (thread-safe; a no-op unless that overlay is visible; pass `""` to
-clear). The shipped Boulder macro shows `"Death Detected"` while its interrupt
-runs and clears it on (re)start. The overlay also draws live per-side rumble
+clear). The shipped Boulder macros show `"Death Detected"` while their interrupt
+runs and clear it on (re)start. The overlay also draws live per-side rumble
 meters (fed by `ui::setRumble(left, right)`) that turn red past `kRumbleMin`,
 and a cassette-style play/pause glyph in place of the old RUNNING/PAUSED words.
 
-
+### 1. Copy an existing macro
 
 Copy [`src/macros/boulder_macro.{h,cpp}`](src/macros) to a new name (e.g.
 `cinder_macro`), rename the namespace, and edit the `kSequence` table. The
-public interface (`start` / `reset` / `update` / `isRunning` / `isDone` /
-`pause` / `resume` / `isPaused`) stays identical, so the runner can drive any
-macro the same way.
+public interface (`start` / `reset` / `update` / `feedRumble` /
+`isDeathDetected` / `isRunning` / `isDone` / `pause` / `resume` / `isPaused`)
+stays identical, so the runner can drive any macro the same way.
 
 ```cpp
 // src/macros/cinder_macro.cpp
@@ -179,6 +232,10 @@ macro::Player gPlayer = makePlayer();
 void start()  { gPlayer.start(); }
 void reset()  { gPlayer.reset(); }
 bool update(procon::Input& in) { return gPlayer.update(in); }
+void feedRumble(uint16_t left, uint16_t right) { gPlayer.feedRumble(left, right); }
+bool isDeathDetected() {
+  return gPlayer.isInterrupting() || gPlayer.isInterruptPaused();
+}
 bool isRunning() { return gPlayer.isRunning(); }
 bool isDone()    { return gPlayer.isDone(); }
 void pause()  { gPlayer.pause(); }
@@ -196,6 +253,7 @@ Add the new `.cpp` to `SRCS` in [`src/CMakeLists.txt`](src/CMakeLists.txt):
         "main.cpp"
         "engine.cpp"
         "macros/boulder_macro.cpp"
+        "macros/boulder_macro_ns2.cpp"
         "macros/cinder_macro.cpp"   # <-- add
 ```
 
@@ -207,53 +265,94 @@ To add a row:
 1. Grow the menu arrays and count:
 
    ```cpp
-   constexpr int kMenuCount = 4;                                  // was 3
-   const char *kMenuLabels[kMenuCount] =
-       {"Run Boulder", "Run Cinder", "Reattach USB", "Back"};
+   constexpr int kMenuCount = 6;                                   // was 5
+   const char *kMenuLabels[kMenuCount] = {"Press A", "Run Boulder (NS2)",
+                                          "Run Boulder (PC)", "Run Cinder",
+                                          "Reattach USB", "Back"};
    ```
-   and widen `gMenuRow[]` to match `kMenuCount`.
+   and widen `gMenuRow[]` to match `kMenuCount`. Rows are drawn at
+   `18 + i * 20` in the 14px font, so the 240x136 panel fits about six before
+   they need to be tightened further.
 
-2. Handle the new selection index in `activateMenu()`. Reuse the shared run
-   flow — raising `Command::RunMacro` starts a run and opens the RUNNING
-overlay (short tap = pause/resume, long hold = stop and return to the menu).
-The RUNNING overlay draws a live Pro Controller diagram that highlights the
-buttons the macro is pressing and moves the analog stick dots in real time:
+2. Add a `Command` value for the new macro in
+   [`src/ui/display.h`](src/ui/display.h) — the runner distinguishes macros by
+   command, not by a separate id:
+
+   ```cpp
+   enum class Command {
+     None,
+     PressA,
+     RunMacroNs2,
+     RunMacroPc,
+     RunCinder,   // <-- add
+     Reattach,
+     TogglePause,
+     StopMacro,
+   };
+   ```
+
+3. Handle the new selection index in `activateMenu()`. Calling `openRun()`
+   opens the RUNNING overlay (short tap = pause/resume, long hold = stop and
+   return to the menu), which draws a live Pro Controller diagram that
+   highlights the buttons the macro is pressing and moves the analog stick dots
+   in real time. Menu items that are not runs (like `PressA`) simply raise
+   their command and leave the menu open:
 
    ```cpp
    void activateMenu() {
      switch (gSel) {
-       case 0: gPending = Command::RunMacro;  gRunMacroId = 0; openRun(); break;
-       case 1: gPending = Command::RunMacro;  gRunMacroId = 1; openRun(); break;
-       case 2: gPending = Command::Reattach;  closeMenu();     break;
-       case 3: closeMenu();                                    break;
+       case 0: gPending = Command::PressA; break;                 // stays in the menu
+       case 1: gPending = Command::RunMacroNs2; openRun(); break;
+       case 2: gPending = Command::RunMacroPc; openRun(); break;
+       case 3: gPending = Command::RunCinder; openRun(); break;   // <-- add
+       case 4: gPending = Command::Reattach; closeMenu(); break;
+       case 5: closeMenu(); break;
+       default: break;
      }
    }
    ```
 
-   If a menu item needs behaviour other than running a macro, add a value to the
-   `Command` enum in [`src/ui/display.h`](src/ui/display.h) and act on it in
-   step 4.
-
 ### 4. Run it from `app_loop_task`
 
-The run lifecycle is handled in `app_loop_task` in
-[`src/main.cpp`](src/main.cpp), which reacts to the menu commands:
+Because every macro exposes the same interface, [`src/main.cpp`](src/main.cpp)
+binds to the selected one through a small function-pointer table rather than
+calling a namespace directly:
 
-- `Command::RunMacro` — `start()` the macro and set `gMacroRunning = true`.
-- `Command::TogglePause` — `pause()` / `resume()` the active macro.
-- `Command::StopMacro` — clear `gMacroRunning` and `reset()` (neutralises the
-  controller). Raised by the long-hold exit.
+```cpp
+struct MacroApi {
+  void (*start)();
+  void (*reset)();
+  bool (*update)(procon::Input &);
+  void (*feedRumble)(uint16_t, uint16_t);
+  bool (*isDeathDetected)();
+  void (*pause)();
+  void (*resume)();
+  bool (*isPaused)();
+};
 
-`stream_task` calls the active macro's `update()` each tick only while
-`gMacroRunning` is set, so the macro drives the controller only during an
+static constexpr MacroApi kMacroCinder = {
+    cinder_macro::start,           cinder_macro::reset,
+    cinder_macro::update,          cinder_macro::feedRumble,
+    cinder_macro::isDeathDetected, cinder_macro::pause,
+    cinder_macro::resume,          cinder_macro::isPaused,
+};
+
+static const MacroApi *volatile gMacro = &kMacroNs2;
+```
+
+The run lifecycle lives in `app_loop_task`, which reacts to the menu commands:
+
+- `Command::RunMacro*` — reset the previously selected variant, repoint
+  `gMacro`, `start()` it and set `gMacroRunning = true`. Add the new command to
+  that case label and to the `gMacro = …` selection.
+- `Command::TogglePause` — `pause()` / `resume()` through `gMacro`.
+- `Command::StopMacro` — clear `gMacroRunning`, `gMacro->reset()` and
+  `gProtocol.input.reset()` (otherwise the last held inputs stream forever).
+  Raised by the long-hold exit.
+
+`stream_task` calls `gMacro->feedRumble()` and `gMacro->update()` each tick only
+while `gMacroRunning` is set, so a macro drives the controller only during an
 explicit run.
-
-Because every macro shares the same interface, the simplest way to make several
-macros selectable is a tiny "active macro" indirection — e.g. store the chosen
-macro's function pointers (or a small `switch` on an id like `gRunMacroId`) and
-call through it in the `RunMacro` / `TogglePause` / `StopMacro` handlers. With a
-single macro you can just call `boulder_macro::…` directly, as the shipped code
-does.
 
 ## Continuous integration
 
