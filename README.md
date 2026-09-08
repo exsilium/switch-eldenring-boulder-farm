@@ -36,14 +36,18 @@ containerized `pio run -e feather_s3_idf`, bind-mounting the repo so build
 outputs land back on the host under `.pio/build/feather_s3_idf/`
 (`firmware.elf`, `firmware.bin`).
 
-Extra arguments are forwarded to `pio run`, e.g. `./build.sh -t upload`
+Extra arguments are forwarded to `pio run`, e.g. `./build.sh -t clean` or `./build.sh -t upload`
 (local flashing needs USB device passthrough into the container — see
 [Flashing](#flashing)).
 
 > The first (cold) build is slow because PlatformIO downloads the `espressif32`
-> platform, the ESP-IDF toolchain and the managed components. The platform and
-> toolchain are cached in the Docker image layer, so subsequent builds only
-> recompile changed sources.
+> platform, the ESP-IDF toolchain and the managed components, and Docker has to
+> export the resulting ~10 GB image. That only has to happen once: the launchers
+> **reuse an existing `switch-firmware-builder` image** and skip `docker build`
+> entirely, so repeat runs go straight to recompiling changed sources. Rebuild
+> the image explicitly (after changing the [`Dockerfile`](Dockerfile) or
+> [`platformio.ini`](platformio.ini)) with `--rebuild`, e.g. `./build.sh
+> --rebuild` / `.\build.ps1 --rebuild`, or by setting `REBUILD=1`.
 
 ### Option B — Native PlatformIO
 
@@ -106,6 +110,49 @@ On **Linux** you can flash straight from the build container instead, since
 ```sh
 docker run --rm -v "$PWD:/project" --device /dev/ttyACM0 \
     switch-firmware-builder -t upload
+```
+
+## Running the tests
+
+The host unit tests (engine + rumble decode, see [`test/`](test)) need no
+hardware and no ESP-IDF — only a C++ toolchain. As with the firmware build,
+that can be the container's instead of your own.
+
+### Option A — Docker
+
+**Linux / macOS:**
+
+```sh
+./test.sh
+```
+
+**Windows (PowerShell):**
+
+```powershell
+.\test.ps1
+```
+
+**Windows (cmd):**
+
+```bat
+test.cmd
+```
+
+The launchers reuse the `switch-firmware-builder` image and override its
+entrypoint, i.e. they run `pio test -e native` in the container with the repo
+bind-mounted. Extra arguments are forwarded to `pio test`, e.g.
+`./test.sh -f test_engine` to run a single suite; `--rebuild` forces a fresh
+`docker build` (see the note under [Building](#building)).
+
+> The test run redirects PlatformIO's workspace (`PLATFORMIO_WORKSPACE_DIR`) to
+> a named Docker volume, so it never writes to — or invalidates — the host's
+> `.pio/build/feather_s3_idf/` firmware build, and the Unity/native artifacts
+> stay cached between runs.
+
+### Option B — Native PlatformIO
+
+```sh
+pio test -e native
 ```
 
 ## Writing a macro
@@ -364,6 +411,7 @@ every push, pull request and manual dispatch:
   (no hardware/ESP-IDF needed). See [`test/test_engine`](test/test_engine) and
   [`test/test_rumble`](test/test_rumble); the host build compiles only
   `src/engine.cpp` (via `build_src_filter`) with an injected virtual clock.
+  Locally the same suite runs in Docker via `./test.sh` / `.\test.ps1`.
 - **Docker firmware build** — builds the Docker image and runs the containerized
   firmware build, then uploads `firmware.elf` / `firmware.bin` as workflow
   artifacts. The workflow reclaims runner disk space before building because the

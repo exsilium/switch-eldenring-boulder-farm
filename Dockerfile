@@ -11,6 +11,11 @@
 #
 # Extra arguments are appended to `pio run -e feather_s3_idf`, e.g.:
 #   docker run --rm -v "$PWD:/project" switch-firmware-builder -t upload
+#
+# The same image also runs the host unit tests (see test.sh / test.ps1) by
+# overriding the entrypoint:
+#   docker run --rm -v "$PWD:/project" --entrypoint pio switch-firmware-builder \
+#       test -e native
 FROM python:3.12-slim
 
 # Minimal system dependencies PlatformIO / ESP-IDF need to build.
@@ -38,6 +43,11 @@ WORKDIR /project
 # the actual sources are bind-mounted at run time.
 COPY platformio.ini ./platformio.ini
 RUN pio pkg install -e feather_s3_idf
+
+# Same for the host-test env. Its workspace is baked at /pio, which is where the
+# test launchers mount their named volume -- Docker seeds an empty volume from
+# the image, so Unity is already there on the first `pio test -e native` run.
+RUN PLATFORMIO_WORKSPACE_DIR=/pio pio pkg install -e native
 
 # `pio run` for the firmware env. Additional args (e.g. `-t upload`) are appended.
 ENTRYPOINT ["pio", "run", "-e", "feather_s3_idf"]
